@@ -69,12 +69,14 @@ li.file{display:flex; align-items:center; gap:12px; padding:10px 0; border-top:1
 .toast{position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:10px 16px; border-radius:8px; font-size:14px; max-width:92vw; z-index:10}
 @media (max-width:600px){ .modes{grid-template-columns:repeat(2,1fr)} }
 
-/* Página usada para Word → PDF (fora da tela) */
-.render-page{position:absolute; left:-10000px; top:0; width:794px; padding:0 76px; background:#fff; color:#111; font:15px/1.5 Calibri, Carlito, Arial, sans-serif}
-.render-page h1{font-size:26px; margin:18px 0 10px} .render-page h2{font-size:21px; margin:16px 0 8px} .render-page h3{font-size:18px; margin:14px 0 6px}
-.render-page p{margin:0 0 10px} .render-page ul,.render-page ol{margin:0 0 10px; padding-left:28px; list-style:revert}
-.render-page table{border-collapse:collapse; width:100%; margin:0 0 12px} .render-page td,.render-page th{border:1px solid #9aa0aa; padding:4px 7px; vertical-align:top; color:#111}
-.render-page img{max-width:100%; height:auto}
+/* Word → PDF: área de montagem das páginas (invisível) */
+.w2p-stage{position:fixed; left:0; top:0; opacity:0; pointer-events:none; z-index:-1}
+.w2p{color:#000; line-height:1.15; text-align:left; background:transparent}
+.w2p p{margin:0}
+.w2p table{border-collapse:collapse; table-layout:fixed}
+.w2p td{overflow-wrap:break-word}
+.w2p img{max-width:none}
+.w2p-page{position:relative; background:#fff; overflow:hidden; color:#000}
 </style>
 </head>
 <body>
@@ -130,7 +132,6 @@ li.file{display:flex; align-items:center; gap:12px; padding:10px 0; border-top:1
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -658,58 +659,712 @@ async function pdfToXlsx(item, prog){
   return { blob: new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), ext: 'xlsx', meta: `${pdf.numPages} pág.` };
 }
 
-/* ---------- Word → PDF ---------- */
+/* ---------- Word → PDF (leitor próprio de .docx: estilos, tabelas, listas, cabeçalho e rodapé) ---------- */
+const NS_W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+const NS_R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const NS_A = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+const NS_WPS = 'http://schemas.microsoft.com/office/word/2010/wordprocessingShape';
+const EMU = 9525, TW = 15; // EMU e twips por pixel (96 dpi)
+const HL = { yellow:'FFFF00', green:'00FF00', cyan:'00FFFF', magenta:'FF00FF', blue:'0000FF', red:'FF0000', darkBlue:'000080', darkCyan:'008080', darkGreen:'008000', darkMagenta:'800080', darkRed:'800000', darkYellow:'808000', darkGray:'808080', lightGray:'C0C0C0', black:'000000', white:'FFFFFF' };
+const wA = (el, n) => { if (!el) return null; const v = el.getAttributeNS(NS_W, n); return v !== null && v !== '' ? v : (el.getAttribute('w:' + n) || null); };
+const kids = (el, n) => el ? [...el.children].filter(c => !n || c.localName === n) : [];
+const kid = (el, n) => el ? [...el.children].find(c => c.localName === n) || null : null;
+const onOff = el => { const v = wA(el, 'val'); return !(v === '0' || v === 'false' || v === 'off'); };
+const xmlDoc = s => new DOMParser().parseFromString(s, 'application/xml');
+const escH = s => String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[c]));
+function fontStack(name){
+  if (!name) return null;
+  const n = name.toLowerCase();
+  const map = { calibri: 'Calibri, Carlito, Arial, sans-serif', cambria: 'Cambria, Caladea, Georgia, serif', arial: 'Arial, "Liberation Sans", Arimo, Helvetica, sans-serif',
+    'times new roman': '"Times New Roman", "Liberation Serif", Tinos, Times, serif', 'courier new': '"Courier New", "Liberation Mono", Cousine, monospace' };
+  if (map[n]) return map[n];
+  const serif = /times|garamond|georgia|cambria|book|palatino|serif|century/.test(n);
+  return `"${name.replace(/"/g, '')}", ${serif ? '"Times New Roman", serif' : 'Arial, sans-serif'}`;
+}
+
+function parseStyles(doc){
+  const styles = {}; let defPara = null;
+  if (doc) for (const s of doc.getElementsByTagNameNS(NS_W, 'style')){
+    const id = wA(s, 'styleId');
+    styles[id] = { type: wA(s, 'type'), basedOn: wA(kid(s, 'basedOn'), 'val'), pPr: kid(s, 'pPr'), rPr: kid(s, 'rPr'), tblPr: kid(s, 'tblPr') };
+    if (wA(s, 'type') === 'paragraph' && /^(1|true)$/.test(wA(s, 'default') || '')) defPara = id;
+  }
+  const dd = doc && doc.getElementsByTagNameNS(NS_W, 'docDefaults')[0];
+  return { styles, defPara, dPPr: dd ? kid(kid(dd, 'pPrDefault'), 'pPr') : null, dRPr: dd ? kid(kid(dd, 'rPrDefault'), 'rPr') : null };
+}
+function chainOf(X, id){
+  const out = []; let g = 0;
+  while (id && X.st.styles[id] && g++ < 20){ out.unshift(X.st.styles[id]); id = X.st.styles[id].basedOn; }
+  return out;
+}
+function readPPr(pPr, P){
+  if (!pPr) return;
+  const jc = kid(pPr, 'jc'); if (jc) P.jc = wA(jc, 'val');
+  const ind = kid(pPr, 'ind');
+  if (ind){
+    const l = wA(ind, 'left') ?? wA(ind, 'start'); if (l != null) P.ind.left = +l;
+    const r = wA(ind, 'right') ?? wA(ind, 'end'); if (r != null) P.ind.right = +r;
+    const f = wA(ind, 'firstLine'); if (f != null){ P.ind.first = +f; delete P.ind.hang; }
+    const h = wA(ind, 'hanging'); if (h != null){ P.ind.hang = +h; delete P.ind.first; }
+  }
+  const sp = kid(pPr, 'spacing');
+  if (sp){
+    for (const a of ['before', 'after', 'line']){ const v = wA(sp, a); if (v != null) P.sp[a] = +v; }
+    const lr = wA(sp, 'lineRule'); if (lr) P.sp.lineRule = lr;
+    if (/^(1|true)$/.test(wA(sp, 'beforeAutospacing') || '')) P.sp.before = 280;
+    if (/^(1|true)$/.test(wA(sp, 'afterAutospacing') || '')) P.sp.after = 280;
+  }
+  const pb = kid(pPr, 'pageBreakBefore'); if (pb) P.pageBreakBefore = onOff(pb);
+  const np = kid(pPr, 'numPr');
+  if (np){ const il = kid(np, 'ilvl'), id = kid(np, 'numId'); if (id) P.numId = wA(id, 'val'); if (il) P.ilvl = +wA(il, 'val'); }
+  const tabs = kid(pPr, 'tabs');
+  if (tabs) for (const t of kids(tabs, 'tab')){
+    const pos = +wA(t, 'pos'), val = wA(t, 'val');
+    P.tabs = P.tabs.filter(x => x.pos !== pos);
+    if (val !== 'clear') P.tabs.push({ pos, val, leader: wA(t, 'leader') });
+  }
+  const shd = kid(pPr, 'shd'); if (shd){ const f = wA(shd, 'fill'); if (f && f !== 'auto') P.shd = f; }
+  const cs = kid(pPr, 'contextualSpacing'); if (cs) P.contextual = onOff(cs);
+}
+function readRPr(rPr, R, X){
+  if (!rPr) return;
+  for (const k of ['b', 'i', 'strike', 'dstrike', 'caps', 'smallCaps', 'vanish']){ const e = kid(rPr, k); if (e) R[k] = onOff(e); }
+  const u = kid(rPr, 'u'); if (u){ const v = wA(u, 'val'); R.u = !!v && v !== 'none'; }
+  const sz = kid(rPr, 'sz'); if (sz) R.sz = +wA(sz, 'val');
+  const c = kid(rPr, 'color'); if (c){ const v = wA(c, 'val'); R.color = v && v !== 'auto' ? v : null; }
+  const h = kid(rPr, 'highlight'); if (h){ const v = wA(h, 'val'); R.hl = v && v !== 'none' ? v : null; }
+  const sh = kid(rPr, 'shd'); if (sh){ const f = wA(sh, 'fill'); R.shd = f && f !== 'auto' ? f : null; }
+  const va = kid(rPr, 'vertAlign'); if (va) R.va = wA(va, 'val');
+  const f = kid(rPr, 'rFonts');
+  if (f){
+    const a = wA(f, 'ascii') || wA(f, 'hAnsi');
+    if (a) R.font = a;
+    else { const t = wA(f, 'asciiTheme') || wA(f, 'hAnsiTheme'); if (t) R.font = t.startsWith('major') ? X.majorFont : X.minorFont; }
+  }
+  const rs = kid(rPr, 'rStyle'); if (rs) R.rStyle = wA(rs, 'val');
+}
+function runCss(R){
+  const s = [];
+  if (R.b) s.push('font-weight:700');
+  if (R.i) s.push('font-style:italic');
+  const dec = []; if (R.u) dec.push('underline'); if (R.strike || R.dstrike) dec.push('line-through');
+  if (dec.length) s.push('text-decoration:' + dec.join(' '));
+  let size = R.sz ? R.sz / 2 : null;
+  if (R.va === 'superscript' || R.va === 'subscript'){ size = (size || 11) * 0.65; s.push('vertical-align:' + (R.va === 'superscript' ? 'super' : 'sub')); }
+  if (size) s.push(`font-size:${size}pt`);
+  if (R.color) s.push('color:#' + R.color);
+  const bg = R.hl ? HL[R.hl] : R.shd; if (bg) s.push('background:#' + bg);
+  if (R.caps) s.push('text-transform:uppercase');
+  if (R.smallCaps) s.push('font-variant:small-caps');
+  if (R.font) s.push('font-family:' + escH(fontStack(R.font)));
+  return s.join(';');
+}
+
+function parseNumbering(doc){
+  const abs = {}, nums = {};
+  if (doc){
+    for (const a of doc.getElementsByTagNameNS(NS_W, 'abstractNum')){
+      const lv = {};
+      for (const l of kids(a, 'lvl')) lv[+wA(l, 'ilvl')] = { start: +(wA(kid(l, 'start'), 'val') || 1), fmt: wA(kid(l, 'numFmt'), 'val') || 'decimal', text: wA(kid(l, 'lvlText'), 'val') ?? '', pPr: kid(l, 'pPr'), rPr: kid(l, 'rPr'), suff: wA(kid(l, 'suff'), 'val') || 'tab' };
+      abs[wA(a, 'abstractNumId')] = lv;
+    }
+    for (const n of doc.getElementsByTagNameNS(NS_W, 'num')){
+      const over = {};
+      for (const o of kids(n, 'lvlOverride')){ const so = kid(o, 'startOverride'); if (so) over[+wA(o, 'ilvl')] = +wA(so, 'val'); }
+      nums[wA(n, 'numId')] = { abs: wA(kid(n, 'abstractNumId'), 'val'), over };
+    }
+  }
+  return { abs, nums, counters: {} };
+}
+const roman = n => { let r = ''; for (const [v, s] of [[1000,'m'],[900,'cm'],[500,'d'],[400,'cd'],[100,'c'],[90,'xc'],[50,'l'],[40,'xl'],[10,'x'],[9,'ix'],[5,'v'],[4,'iv'],[1,'i']]) while (n >= v){ r += s; n -= v; } return r; };
+const letter = n => { let s = ''; while (n > 0){ n--; s = String.fromCharCode(97 + n % 26) + s; n = Math.floor(n / 26); } return s; };
+function fmtNum(n, fmt){
+  switch (fmt){
+    case 'lowerLetter': return letter(n); case 'upperLetter': return letter(n).toUpperCase();
+    case 'lowerRoman': return roman(n); case 'upperRoman': return roman(n).toUpperCase();
+    case 'decimalZero': return String(n).padStart(2, '0'); case 'ordinal': return n + 'º';
+    case 'none': return ''; default: return String(n);
+  }
+}
+function bulletChar(t){
+  if (!t) return '•';
+  const c = t.charCodeAt(0);
+  if (t === 'o') return '◦';
+  if (c === 0xF0A7 || t === '§') return '▪';
+  if (c === 0xF0D8) return '➢';
+  if (c === 0xF0FC) return '✓';
+  if (c >= 0xF000 && c <= 0xF0FF) return '•';
+  return t;
+}
+function numLabel(X, numId, ilvl){
+  const N = X.num, n = N.nums[numId]; if (!n) return null;
+  const levels = N.abs[n.abs]; if (!levels || !levels[ilvl]) return null;
+  const lv = levels[ilvl];
+  const cs = N.counters[numId] || (N.counters[numId] = []);
+  for (let i = 0; i < ilvl; i++) if (cs[i] == null) cs[i] = n.over[i] ?? (levels[i] ? levels[i].start : 1);
+  cs[ilvl] = cs[ilvl] == null ? (n.over[ilvl] ?? lv.start) : cs[ilvl] + 1;
+  cs.length = ilvl + 1;
+  const text = lv.fmt === 'bullet' ? bulletChar(lv.text) : lv.text.replace(/%(\d)/g, (_, k) => { const i = +k - 1; return fmtNum(cs[i] ?? 1, levels[i] ? levels[i].fmt : 'decimal'); });
+  return { text, lv };
+}
+
+/* conteúdo em linha (runs, hyperlinks, campos, desenhos) */
+function walkInline(node, X, C, P, out, baseR){
+  for (const c of node.children){
+    const ln = c.localName;
+    if (ln === 'r') runHtml(c, X, C, P, out, baseR);
+    else if (['hyperlink', 'ins', 'smartTag', 'customXml', 'fldSimple', 'moveTo', 'dir', 'bdo'].includes(ln)){
+      if (ln === 'fldSimple' && /\bPAGE\b/.test(wA(c, 'instr') || '') && C.part !== 'body'){ out.push(/NUMPAGES/.test(wA(c, 'instr')) ? '<span class="pgtot">1</span>' : '<span class="pgnum">1</span>'); continue; }
+      walkInline(c, X, C, P, out, baseR);
+    }
+    else if (ln === 'sdt') walkInline(kid(c, 'sdtContent') || c, X, C, P, out, baseR);
+    else if (ln === 'oMath' || ln === 'oMathPara') out.push(escH([...c.getElementsByTagName('m:t')].map(t => t.textContent).join('')));
+  }
+}
+function runHtml(r, X, C, P, out, baseR){
+  const R = { ...baseR };
+  const rPr = kid(r, 'rPr');
+  const tmp = {}; readRPr(rPr, tmp, X);
+  if (tmp.rStyle) for (const s of chainOf(X, tmp.rStyle)) readRPr(s.rPr, R, X);
+  readRPr(rPr, R, X);
+  if (R.vanish) return;
+  const css = runCss(R);
+  const parts = [];
+  const F = C.fld;
+  for (const c of r.children){
+    const ln = c.localName;
+    if (ln === 'fldChar'){
+      const t = wA(c, 'fldCharType');
+      if (t === 'begin') F.push({ instr: '', phase: 'instr', emitted: false });
+      else if (t === 'separate' && F.length) F[F.length - 1].phase = 'result';
+      else if (t === 'end' && F.length){
+        const f = F.pop();
+        if (C.part !== 'body' && /\bPAGE\b|NUMPAGES/.test(f.instr) && !f.emitted) parts.push(/NUMPAGES/.test(f.instr) ? '<span class="pgtot">1</span>' : '<span class="pgnum">1</span>');
+      }
+      continue;
+    }
+    if (ln === 'instrText'){ if (F.length) F[F.length - 1].instr += c.textContent; continue; }
+    const fld = F.length ? F[F.length - 1] : null;
+    if (fld && fld.phase === 'instr') continue;
+    const pageFld = fld && C.part !== 'body' && /\bPAGE\b|NUMPAGES/.test(fld.instr);
+    if (ln === 't'){
+      let t = c.textContent;
+      if (pageFld){ if (!fld.emitted){ fld.emitted = true; parts.push(/NUMPAGES/.test(fld.instr) ? '<span class="pgtot">1</span>' : '<span class="pgnum">1</span>'); } continue; }
+      t = escH(t).replace(/ {2,}/g, m => ' '.repeat(m.length));
+      if (!P.hasText && /^ /.test(t)) t = ' ' + t.slice(1);
+      if (t.trim()) P.hasText = true;
+      parts.push(t);
+    }
+    else if (ln === 'tab' || ln === 'ptab') parts.push('<span class="tab"></span>');
+    else if (ln === 'br'){
+      const ty = wA(c, 'type');
+      if (ty === 'page'){ parts.push('<span class="pbr"></span>'); P.hasText = true; }
+      else parts.push('<br>');
+    }
+    else if (ln === 'cr') parts.push('<br>');
+    else if (ln === 'sym'){ const code = parseInt(wA(c, 'char') || '0', 16); parts.push(code >= 0xF000 ? bulletChar(String.fromCharCode(code)) : String.fromCharCode(code)); P.hasText = true; }
+    else if (ln === 'noBreakHyphen') parts.push('-');
+    else if (ln === 'drawing'){ const h = drawingHtml(c, X, C); if (h){ parts.push(h); P.hasText = true; } }
+    else if (ln === 'AlternateContent'){
+      const ch = kid(c, 'Choice');
+      const d = ch && [...ch.getElementsByTagNameNS(NS_W, 'drawing')][0];
+      if (d){ const h = drawingHtml(d, X, C); if (h){ parts.push(h); P.hasText = true; } }
+      else { const fb = kid(c, 'Fallback'); if (fb) parts.push(vmlHtml(fb, C)); }
+    }
+    else if (ln === 'pict' || ln === 'object') parts.push(vmlHtml(c, C));
+  }
+  if (!parts.length) return;
+  out.push(css ? `<span style="${css}">${parts.join('')}</span>` : parts.join(''));
+}
+function vmlHtml(el, C){
+  const im = el.getElementsByTagName('v:imagedata')[0];
+  if (!im) return '';
+  const id = im.getAttributeNS(NS_R, 'id') || im.getAttribute('r:id');
+  const src = C.rels[id]; if (!src) return '';
+  const shape = im.parentElement, st = (shape && shape.getAttribute('style')) || '';
+  const g = k => { const m = new RegExp(k + ':\\s*([\\d.]+)(pt|px|in|cm|mm)?').exec(st); if (!m) return null; const v = +m[1], u = m[2] || 'px'; return v * ({ pt: 96/72, px: 1, in: 96, cm: 96/2.54, mm: 96/25.4 })[u]; };
+  const w = g('width'), h = g('height');
+  return `<img src="${src}" style="${w ? `width:${w}px;` : ''}${h ? `height:${h}px;` : ''}vertical-align:bottom">`;
+}
+function drawingHtml(d, X, C){
+  const box = kid(d, 'inline') || kid(d, 'anchor'); if (!box) return '';
+  const ext = kid(box, 'extent');
+  const w = ext ? +ext.getAttribute('cx') / EMU : 0, h = ext ? +ext.getAttribute('cy') / EMU : 0;
+  const inner = drawingInner(box, w, h, X, C);
+  if (!inner) return '';
+  if (box.localName === 'anchor' && C.anchors){ C.anchors.push({ el: box, w, h, html: inner }); return ''; }
+  return `<span style="display:inline-block;width:${w}px;height:${h}px;vertical-align:${box.localName === 'anchor' ? 'top' : 'bottom'}">${inner}</span>`;
+}
+function drawingInner(box, w, h, X, C){
+  const blip = box.getElementsByTagNameNS(NS_A, 'blip')[0];
+  if (blip){
+    const id = blip.getAttributeNS(NS_R, 'embed') || blip.getAttribute('r:embed');
+    const src = C.rels[id]; if (!src) return '';
+    let op = 1;
+    const am = blip.getElementsByTagNameNS(NS_A, 'alphaModFix')[0]; if (am) op = (+am.getAttribute('amt') || 100000) / 100000;
+    const lum = blip.getElementsByTagNameNS(NS_A, 'lum')[0]; if (lum && +lum.getAttribute('bright') > 0) op *= 1 - (+lum.getAttribute('bright')) / 100000 * 0.85;
+    return `<img src="${src}" style="width:${w}px;height:${h}px;display:block;opacity:${op.toFixed(2)}">`;
+  }
+  const txbx = box.getElementsByTagNameNS(NS_WPS, 'txbx')[0];
+  const spPr = box.getElementsByTagNameNS(NS_WPS, 'spPr')[0];
+  let bg = '';
+  if (spPr){ const sf = kid(spPr, 'solidFill'); const clr = sf && kid(sf, 'srgbClr'); if (clr) bg = 'background:#' + clr.getAttribute('val') + ';'; }
+  let html = '', pad = '3.8px 7.6px';
+  if (txbx){
+    const cont = txbx.getElementsByTagNameNS(NS_W, 'txbxContent')[0];
+    html = cont ? blocksHtml(kids(cont), X, { ...C, anchors: null, fld: [] }) : '';
+    const bp = box.getElementsByTagNameNS(NS_WPS, 'bodyPr')[0];
+    if (bp){ const e = (k, d) => (bp.hasAttribute(k) ? +bp.getAttribute(k) : d) / EMU; pad = `${e('tIns', 45720)}px ${e('rIns', 91440)}px ${e('bIns', 45720)}px ${e('lIns', 91440)}px`; }
+  }
+  if (!html && !bg) return '';
+  return `<div style="width:${w}px;min-height:${h}px;box-sizing:border-box;padding:${pad};${bg}">${html}</div>`;
+}
+
+/* parágrafos */
+function paraObj(p, X, C){
+  const pPr = kid(p, 'pPr');
+  const P = { ind: {}, sp: {}, tabs: [] };
+  const D = { ind: {}, sp: {}, tabs: [] }; readPPr(pPr, D);
+  const pst = wA(kid(pPr, 'pStyle'), 'val') || X.st.defPara;
+  const chain = chainOf(X, pst);
+  readPPr(X.st.dPPr, P);
+  for (const t of C.tblPPr || []) readPPr(t, P);
+  for (const s of chain) readPPr(s.pPr, P);
+  const numId = D.numId ?? P.numId, ilvl = D.ilvl ?? P.ilvl ?? 0;
+  let label = null;
+  if (numId && numId !== '0'){ label = numLabel(X, numId, ilvl); if (label) readPPr(label.lv.pPr, P); }
+  readPPr(pPr, P);
+  const baseR = {};
+  readRPr(X.st.dRPr, baseR, X);
+  for (const t of C.tblRPr || []) readRPr(t, baseR, X);
+  for (const s of chain) readRPr(s.rPr, baseR, X);
+  const markR = { ...baseR }; readRPr(kid(pPr, 'rPr'), markR, X);
+  const out = [];
+  if (label){
+    const LR = { ...markR }; readRPr(label.lv.rPr, LR, X);
+    if (label.lv.fmt === 'bullet') LR.font = null;
+    out.push(`<span style="${runCss(LR)}">${escH(label.text)}</span>`);
+    if (label.lv.suff === 'tab') out.push('<span class="tab" data-num="1"></span>');
+    else if (label.lv.suff === 'space') out.push(' ');
+  }
+  const S = { hasText: false };
+  walkInline(p, X, C, S, out, baseR);
+  let inner = out.join('');
+  const visible = S.hasText || label || /<img|<span class="tab"|<div/.test(inner);
+  if (!visible) inner += '<br>';
+  const css = [];
+  const al = { center: 'center', right: 'right', end: 'right', both: 'justify', distribute: 'justify', left: 'left', start: 'left' }[P.jc];
+  if (al) css.push('text-align:' + al);
+  const px = v => (v / TW).toFixed(2) + 'px';
+  if (P.ind.left) css.push('margin-left:' + px(P.ind.left));
+  if (P.ind.right) css.push('margin-right:' + px(P.ind.right));
+  if (P.ind.first) css.push('text-indent:' + px(P.ind.first));
+  else if (P.ind.hang) css.push('text-indent:-' + px(P.ind.hang));
+  const line = P.sp.line;
+  if (line){
+    if (!P.sp.lineRule || P.sp.lineRule === 'auto') css.push('line-height:' + (line / 240 * 1.15).toFixed(3));
+    else css.push('line-height:' + px(line));
+  }
+  if (markR.sz) css.push(`font-size:${markR.sz / 2}pt`);
+  if (markR.font) css.push('font-family:' + escH(fontStack(markR.font)));
+  if (P.shd) css.push('background:#' + P.shd);
+  const tabs = P.tabs.map(t => `${(t.pos / TW).toFixed(1)}:${t.val}:${t.leader || ''}`).join(',');
+  const pb = P.pageBreakBefore ? ' data-pb="1"' : '';
+  const pba = pPr && kid(pPr, 'sectPr') ? ' data-pba="1"' : '';
+  return { pst, contextual: !!P.contextual, before: P.sp.before || 0, after: P.sp.after || 0,
+    open: `<p style="${css.join(';')}" data-tabs="${tabs}" data-left="${((P.ind.left || 0) / TW).toFixed(1)}"${pb}${pba}`, inner };
+}
+function blocksHtml(nodes, X, C){
+  const items = [];
+  const flat = [];
+  const add = n => {
+    for (const c of n){
+      if (c.localName === 'sdt'){ add(kids(kid(c, 'sdtContent'))); continue; }
+      if (c.localName === 'customXml'){ add(kids(c)); continue; }
+      if (c.localName === 'AlternateContent'){ const ch = kid(c, 'Choice'); if (ch) add(kids(ch)); continue; }
+      flat.push(c);
+    }
+  };
+  add(nodes);
+  for (const c of flat){
+    if (c.localName === 'p') items.push(paraObj(c, X, C));
+    else if (c.localName === 'tbl') items.push({ html: tableHtml(c, X, C) });
+  }
+  // espaçamento contextual
+  for (let i = 1; i < items.length; i++){
+    const a = items[i - 1], b = items[i];
+    if (a.open && b.open && a.pst === b.pst && (a.contextual || b.contextual)){ a.after = 0; b.before = 0; }
+  }
+  return items.map(it => it.html != null ? it.html
+    : `${it.open.replace('style="', `style="padding-top:${(it.before / TW).toFixed(2)}px;padding-bottom:${(it.after / TW).toFixed(2)}px;`)}>${it.inner}</p>`).join('');
+}
+
+/* tabelas */
+function readBorders(el, B){
+  if (!el) return;
+  for (const side of ['top', 'left', 'bottom', 'right', 'insideH', 'insideV', 'start', 'end']){
+    const e = kid(el, side); if (!e) continue;
+    const key = side === 'start' ? 'left' : side === 'end' ? 'right' : side;
+    const v = wA(e, 'val');
+    if (!v || v === 'nil' || v === 'none'){ B[key] = 'none'; continue; }
+    const w = Math.max(1, (+wA(e, 'sz') || 4) / 8 * 96 / 72);
+    const col = wA(e, 'color'); const color = !col || col === 'auto' ? '#000' : '#' + col;
+    B[key] = v === 'double' ? `${Math.max(3, w * 3).toFixed(1)}px double ${color}` : `${w.toFixed(2)}px ${/dash/.test(v) ? 'dashed' : /dot/.test(v) ? 'dotted' : 'solid'} ${color}`;
+  }
+}
+function tableHtml(tbl, X, C){
+  const tblPr = kid(tbl, 'tblPr');
+  const grid = kids(kid(tbl, 'tblGrid'), 'gridCol').map(g => (+wA(g, 'w') || 0) / TW);
+  const tst = wA(kid(tblPr, 'tblStyle'), 'val');
+  const chain = chainOf(X, tst);
+  const B = {}; const mar = { left: 108 / TW, right: 108 / TW, top: 0, bottom: 0 };
+  const readMar = el => { if (!el) return; for (const s of ['left', 'right', 'top', 'bottom', 'start', 'end']){ const e = kid(el, s); if (e){ const k = s === 'start' ? 'left' : s === 'end' ? 'right' : s; mar[k] = (+wA(e, 'w') || 0) / TW; } } };
+  for (const s of chain){ readBorders(kid(s.tblPr, 'tblBorders'), B); readMar(kid(s.tblPr, 'tblCellMar')); }
+  readBorders(kid(tblPr, 'tblBorders'), B); readMar(kid(tblPr, 'tblCellMar'));
+  const tC = { ...C, tblPPr: chain.map(s => s.pPr).filter(Boolean), tblRPr: chain.map(s => s.rPr).filter(Boolean) };
+  const rows = kids(tbl, 'tr').map(tr => {
+    let col = 0; const cells = [];
+    const trPr = kid(tr, 'trPr'); const gb = kid(trPr, 'gridBefore'); if (gb) col += +wA(gb, 'val') || 0;
+    for (const tc of kids(tr, 'tc')){
+      const tcPr = kid(tc, 'tcPr');
+      const span = +(wA(kid(tcPr, 'gridSpan'), 'val') || 1);
+      const vm = kid(tcPr, 'vMerge');
+      cells.push({ tc, tcPr, col, span, vm: vm ? (wA(vm, 'val') === 'restart' ? 'restart' : 'cont') : null });
+      col += span;
+    }
+    const hEl = kid(trPr, 'trHeight');
+    return { cells, h: hEl ? (+wA(hEl, 'val') || 0) / TW : 0, exact: hEl && wA(hEl, 'hRule') === 'exact' };
+  });
+  const nCols = Math.max(grid.length, ...rows.map(r => r.cells.reduce((m, c) => Math.max(m, c.col + c.span), 0)));
+  const nRows = rows.length;
+  let html = '';
+  rows.forEach((row, ri) => {
+    html += `<tr${row.h ? ` style="height:${row.h.toFixed(1)}px"` : ''}>`;
+    for (const c of row.cells){
+      if (c.vm === 'cont') continue;
+      let rs = 1;
+      if (c.vm === 'restart') for (let k = ri + 1; k < nRows; k++){ const m = rows[k].cells.find(x => x.col === c.col); if (m && m.vm === 'cont') rs++; else break; }
+      const CB = { ...B }; readBorders(kid(c.tcPr, 'tcBorders'), CB);
+      const bt = CB.top && ri === 0 ? CB.top : (ri === 0 ? B.top : (kid(kid(c.tcPr, 'tcBorders'), 'top') ? CB.top : B.insideH));
+      const bb = ri + rs >= nRows ? CB.bottom : (kid(kid(c.tcPr, 'tcBorders'), 'bottom') ? CB.bottom : B.insideH);
+      const bl = c.col === 0 ? CB.left : (kid(kid(c.tcPr, 'tcBorders'), 'left') || kid(kid(c.tcPr, 'tcBorders'), 'start') ? CB.left : B.insideV);
+      const br = c.col + c.span >= nCols ? CB.right : (kid(kid(c.tcPr, 'tcBorders'), 'right') || kid(kid(c.tcPr, 'tcBorders'), 'end') ? CB.right : B.insideV);
+      const css = [`border-top:${bt || 'none'}`, `border-bottom:${bb || 'none'}`, `border-left:${bl || 'none'}`, `border-right:${br || 'none'}`,
+        `padding:${mar.top}px ${mar.right}px ${mar.bottom}px ${mar.left}px`];
+      const shd = kid(c.tcPr, 'shd'); const fill = shd && wA(shd, 'fill'); if (fill && fill !== 'auto') css.push('background:#' + fill);
+      const va = wA(kid(c.tcPr, 'vAlign'), 'val'); css.push('vertical-align:' + (va === 'center' ? 'middle' : va === 'bottom' ? 'bottom' : 'top'));
+      html += `<td${c.span > 1 ? ` colspan="${c.span}"` : ''}${rs > 1 ? ` rowspan="${rs}"` : ''} style="${css.join(';')}">${blocksHtml(kids(c.tc), X, tC) || '<p><br></p>'}</td>`;
+    }
+    html += '</tr>';
+  });
+  const total = grid.reduce((a, b) => a + b, 0);
+  const jc = wA(kid(tblPr, 'jc'), 'val');
+  const ind = kid(tblPr, 'tblInd'); const indPx = ind ? (+wA(ind, 'w') || 0) / TW : 0;
+  const tcss = [`width:${total.toFixed(1)}px`, jc === 'center' ? 'margin-left:auto;margin-right:auto' : jc === 'right' || jc === 'end' ? 'margin-left:auto' : `margin-left:${indPx.toFixed(1)}px`];
+  return `<table style="${tcss.join(';')}"><colgroup>${grid.map(w => `<col style="width:${w.toFixed(1)}px">`).join('')}</colgroup>${html}</table>`;
+}
+
+/* posição de desenhos flutuantes (cabeçalho e rodapé) */
+function anchorPos(anc, w, h, L, part){
+  const ph = kid(anc, 'positionH'), pv = kid(anc, 'positionV');
+  const relH = ph ? ph.getAttribute('relativeFrom') : 'column', relV = pv ? pv.getAttribute('relativeFrom') : 'paragraph';
+  let fx = L.ml, fw = L.pageW - L.ml - L.mr;
+  if (relH === 'page'){ fx = 0; fw = L.pageW; } else if (relH === 'leftMargin'){ fx = 0; fw = L.ml; } else if (relH === 'rightMargin'){ fx = L.pageW - L.mr; fw = L.mr; }
+  let fy = part === 'ftr' ? L.pageH - L.mb : L.hdr, fh = 0;
+  if (relV === 'page'){ fy = 0; fh = L.pageH; } else if (relV === 'margin'){ fy = L.mt; fh = L.pageH - L.mt - L.mb; }
+  else if (relV === 'topMargin'){ fy = 0; fh = L.mt; } else if (relV === 'bottomMargin'){ fy = L.pageH - L.mb; fh = L.mb; }
+  const off = e => { const o = kid(e, 'posOffset'); return o ? +o.textContent / EMU : null; };
+  const al = e => { const a = kid(e, 'align'); return a ? a.textContent : null; };
+  let x = ph ? off(ph) : 0;
+  if (x == null){ const a = al(ph); x = a === 'center' ? (fw - w) / 2 : (a === 'right' || a === 'outside') ? fw - w : 0; }
+  let y = pv ? off(pv) : 0;
+  if (y == null){ const a = al(pv); y = a === 'center' ? (fh - h) / 2 : (a === 'bottom' || a === 'outside') ? fh - h : 0; }
+  return { x: x + fx, y: y + fy };
+}
+
+async function loadRels(zip, partPath){
+  const dir = partPath.slice(0, partPath.lastIndexOf('/') + 1);
+  const relPath = dir + '_rels/' + partPath.slice(dir.length) + '.rels';
+  const f = zip.file(relPath); const map = {}, targets = {};
+  if (!f) return { map, targets };
+  const doc = xmlDoc(await f.async('string'));
+  for (const r of doc.getElementsByTagName('Relationship')){
+    const id = r.getAttribute('Id'), type = r.getAttribute('Type') || '', target = r.getAttribute('Target') || '';
+    if (r.getAttribute('TargetMode') === 'External') continue;
+    const parts = (dir + target).split('/'); const norm = [];
+    for (const p of parts){ if (p === '..') norm.pop(); else if (p && p !== '.') norm.push(p); }
+    const path = target.startsWith('/') ? target.slice(1) : norm.join('/');
+    targets[id] = path;
+    if (/\/image$/.test(type)){
+      const ext = (path.split('.').pop() || '').toLowerCase();
+      const mime = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', bmp: 'image/bmp', svg: 'image/svg+xml', webp: 'image/webp' }[ext];
+      const img = zip.file(path);
+      if (mime && img) map[id] = `data:${mime};base64,` + await img.async('base64');
+    }
+  }
+  return { map, targets };
+}
+
+// ajusta a largura de cada tabulação até a próxima parada
+function layoutTabs(root, defTab){
+  const tabs = [...root.querySelectorAll('span.tab')];
+  for (const t of tabs){
+    const p = t.closest('p'); if (!p) continue;
+    const pr = p.getBoundingClientRect(), cs = getComputedStyle(p);
+    const origin = pr.left - parseFloat(cs.marginLeft || 0);
+    t.style.cssText = 'display:inline-block;width:0';
+    const x = t.getBoundingClientRect().left - origin;
+    const stops = (p.dataset.tabs ? p.dataset.tabs.split(',') : []).map(s => { const [pos, val, leader] = s.split(':'); return { pos: +pos, val, leader }; }).filter(s => s.val !== 'bar').sort((a, b) => a.pos - b.pos);
+    const left = +p.dataset.left || 0;
+    let stop = stops.find(s => s.pos > x + 1);
+    if (left > x + 1 && (!stop || left < stop.pos)) stop = { pos: left, val: 'left' };
+    if (!stop) stop = { pos: (Math.floor(x / defTab) + 1) * defTab, val: 'left' };
+    let w = stop.pos - x;
+    if (stop.val === 'right' || stop.val === 'center' || stop.val === 'end'){
+      const r = document.createRange(); r.setStartAfter(t);
+      const next = tabs.find(o => o !== t && p.contains(o) && (t.compareDocumentPosition(o) & Node.DOCUMENT_POSITION_FOLLOWING));
+      if (next) r.setEndBefore(next); else r.setEnd(p, p.childNodes.length);
+      const rects = [...r.getClientRects()].filter(rc => Math.abs(rc.top - t.getBoundingClientRect().top) < 4);
+      const segW = rects.reduce((s, rc) => s + rc.width, 0);
+      w -= stop.val === 'center' ? segW / 2 : segW;
+    }
+    w = Math.max(2, w);
+    const lead = stop.leader === 'dot' ? 'border-bottom:1.5px dotted currentColor' : stop.leader === 'underscore' ? 'border-bottom:1px solid currentColor' : stop.leader === 'hyphen' ? 'border-bottom:1px dashed currentColor' : '';
+    t.style.cssText = `display:inline-block;width:${w.toFixed(1)}px;${lead}`;
+  }
+}
+function collectWords(root){
+  const base = root.getBoundingClientRect();
+  const words = [];
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const rng = document.createRange();
+  let n;
+  while ((n = walker.nextNode())){
+    const txt = n.nodeValue; if (!txt || !txt.trim()) continue;
+    const pe = n.parentElement; if (pe.closest('.pgnum,.pgtot')) continue;
+    const fs = parseFloat(getComputedStyle(pe).fontSize) || 14;
+    const re = /\S+/g; let m;
+    while ((m = re.exec(txt))){
+      rng.setStart(n, m.index); rng.setEnd(n, m.index + m[0].length);
+      const rc = rng.getClientRects()[0]; if (!rc || !rc.width) continue;
+      words.push({ s: m[0], x: rc.left - base.left, y: rc.top - base.top, w: rc.width, h: rc.height, fs });
+    }
+  }
+  return words;
+}
+function addTextLayer(pdf, words, ox, oy, s, e, k){
+  const sel = words.filter(w => w.y + w.h / 2 >= s && w.y + w.h / 2 < e).sort((a, b) => a.y - b.y || a.x - b.x);
+  const lines = [];
+  for (const w of sel){
+    const L = lines.find(l => Math.abs(l.y - w.y) < w.h * 0.4);
+    if (L) L.ws.push(w); else lines.push({ y: w.y, ws: [w] });
+  }
+  pdf.setFont('helvetica', 'normal');
+  for (const L of lines){
+    L.ws.sort((a, b) => a.x - b.x);
+    const text = L.ws.map((w, i) => (i && w.x - (L.ws[i - 1].x + L.ws[i - 1].w) > w.fs * 0.08 ? ' ' : '') + w.s).join('').replace(/[^ -ÿ–—‘’“”•…€]/g, '?');
+    const first = L.ws[0], last = L.ws[L.ws.length - 1];
+    const fs = first.fs * 0.75;
+    pdf.setFontSize(fs);
+    const widthMm = (last.x + last.w - first.x) * k;
+    const meas = pdf.getTextWidth(text);
+    if (!meas) continue;
+    const yb = (oy + first.y - s + first.h * 0.78) * k;
+    try { pdf.text(text, (ox + first.x) * k, yb, { renderingMode: 'invisible', horizontalScale: widthMm / meas }); } catch {}
+  }
+}
+
+// desenha a página com o próprio motor do navegador (SVG foreignObject), sem depender da rolagem da tela
+const W2P_CSS = `*{box-sizing:border-box} .w2p{color:#000;line-height:1.15;text-align:left;background:transparent} .w2p p{margin:0} .w2p table{border-collapse:collapse;table-layout:fixed} .w2p td{overflow-wrap:break-word} .w2p img{max-width:none} .w2p-page{position:relative;background:#fff;overflow:hidden;color:#000}`;
+function svgRender(pg, W, H, scale){
+  return new Promise((resolve, reject) => {
+    const font = getComputedStyle(document.body).fontFamily.replace(/"/g, "'");
+    const xhtml = new XMLSerializer().serializeToString(pg);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W * scale}" height="${H * scale}" viewBox="0 0 ${W} ${H}">`
+      + `<foreignObject x="0" y="0" width="${W}" height="${H}"><div xmlns="http://www.w3.org/1999/xhtml" style="margin:0;font-size:15px;line-height:1.5;font-family:${font}">`
+      + `<style>${W2P_CSS}</style>${xhtml}</div></foreignObject></svg>`;
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const c = document.createElement('canvas');
+        c.width = Math.round(W * scale); c.height = Math.round(H * scale);
+        const x = c.getContext('2d');
+        x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
+        x.drawImage(img, 0, 0, c.width, c.height);
+        resolve(c);
+      } catch (e){ reject(e); }
+    };
+    img.onerror = () => reject(new Error('svg'));
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  });
+}
+// verifica se a renderização saiu em branco (alguns navegadores não suportam foreignObject)
+function blankCanvas(c){
+  try {
+    const w = 60, h = 80, t = document.createElement('canvas'); t.width = w; t.height = h;
+    const x = t.getContext('2d'); x.drawImage(c, 0, 0, w, h);
+    const d = x.getImageData(0, 0, w, h).data;
+    for (let i = 0; i < d.length; i += 4) if (d[i] < 200 || d[i + 1] < 200 || d[i + 2] < 200) return false;
+    return true;
+  } catch { return true; }
+}
 async function docxToPdf(item, prog){
   prog('lendo documento');
-  const { value: html } = await mammoth.convertToHtml({ arrayBuffer: await item.file.arrayBuffer() });
-  const host = document.createElement('div');
-  host.className = 'render-page';
-  host.innerHTML = html || '<p></p>';
-  document.body.appendChild(host);
+  const zip = await JSZip.loadAsync(await item.file.arrayBuffer());
+  const mainPath = 'word/document.xml';
+  const docFile = zip.file(mainPath);
+  if (!docFile) throw new Error('Arquivo .docx inválido ou corrompido.');
+  const doc = xmlDoc(await docFile.async('string'));
+  const readXml = async p => { const f = zip.file(p); return f ? xmlDoc(await f.async('string')) : null; };
+  const X = { st: parseStyles(await readXml('word/styles.xml')), num: parseNumbering(await readXml('word/numbering.xml')), minorFont: 'Calibri', majorFont: 'Calibri Light' };
+  const theme = await readXml('word/theme/theme1.xml');
+  if (theme){
+    const mn = theme.getElementsByTagNameNS(NS_A, 'minorFont')[0], mj = theme.getElementsByTagNameNS(NS_A, 'majorFont')[0];
+    const lat = e => e && kid(e, 'latin') ? kid(e, 'latin').getAttribute('typeface') : null;
+    X.minorFont = lat(mn) || X.minorFont; X.majorFont = lat(mj) || X.majorFont;
+  }
+  const settings = await readXml('word/settings.xml');
+  const defTabEl = settings && settings.getElementsByTagNameNS(NS_W, 'defaultTabStop')[0];
+  const defTab = (defTabEl ? +wA(defTabEl, 'val') : 708) / TW || 47.2;
+
+  const body = doc.getElementsByTagNameNS(NS_W, 'body')[0];
+  const sects = body ? body.getElementsByTagNameNS(NS_W, 'sectPr') : [];
+  const sect = body && kid(body, 'sectPr') || sects[sects.length - 1] || null;
+  const pgSz = kid(sect, 'pgSz'), pgMar = kid(sect, 'pgMar');
+  const g = (el, a, d) => { const v = wA(el, a); return v == null ? d : Math.abs(+v); };
+  const L = { pageW: g(pgSz, 'w', 11906) / TW, pageH: g(pgSz, 'h', 16838) / TW,
+    mt: g(pgMar, 'top', 1417) / TW, mb: g(pgMar, 'bottom', 1417) / TW, ml: g(pgMar, 'left', 1701) / TW, mr: g(pgMar, 'right', 1701) / TW,
+    hdr: g(pgMar, 'header', 708) / TW, ftr: g(pgMar, 'footer', 708) / TW };
+  if (wA(pgSz, 'orient') === 'landscape' && L.pageW < L.pageH){ const t = L.pageW; L.pageW = L.pageH; L.pageH = t; }
+  const contentW = L.pageW - L.ml - L.mr;
+
+  const docRels = await loadRels(zip, mainPath);
+  const partFor = type => {
+    const refs = kids(sect, type + 'Reference');
+    const ref = refs.find(r => wA(r, 'type') === 'default') || refs[0];
+    if (!ref) return null;
+    return docRels.targets[ref.getAttributeNS(NS_R, 'id') || ref.getAttribute('r:id')] || null;
+  };
+  const baseR = {}; readRPr(X.st.dRPr, baseR, X);
+  for (const s of chainOf(X, X.st.defPara)) readRPr(s.rPr, baseR, X);
+  const baseCss = `font-size:${(baseR.sz || 22) / 2}pt;font-family:${escH(fontStack(baseR.font || X.minorFont))}`;
+
+  prog('montando páginas');
+  const bodyHtml = blocksHtml(kids(body).filter(c => c.localName !== 'sectPr'), X, { part: 'body', rels: docRels.map, fld: [], anchors: null });
+  const hf = {};
+  for (const part of ['header', 'footer']){
+    const path = partFor(part);
+    if (!path || !zip.file(path)){ hf[part] = { html: '', anchors: [] }; continue; }
+    const pd = await readXml(path);
+    const rels = await loadRels(zip, path);
+    const C = { part: part === 'header' ? 'hdr' : 'ftr', rels: rels.map, fld: [], anchors: [] };
+    hf[part] = { html: blocksHtml(kids(pd.documentElement), X, C), anchors: C.anchors };
+  }
+
+  const stage = document.createElement('div');
+  stage.className = 'w2p-stage';
+  stage.innerHTML = `<div class="w2p" style="width:${contentW}px;${baseCss}" data-r="body">${bodyHtml}</div>
+    <div class="w2p" style="width:${contentW}px;${baseCss}" data-r="hdr">${hf.header.html}</div>
+    <div class="w2p" style="width:${contentW}px;${baseCss}" data-r="ftr">${hf.footer.html}</div>`;
+  const pages = document.createElement('div');
+  pages.className = 'w2p-stage';
+  document.body.appendChild(stage);
+  document.body.appendChild(pages);
   try {
-    await Promise.all([...host.querySelectorAll('img')].map(img => img.complete ? 0 : new Promise(r => { img.onload = img.onerror = r; })));
+    const [bEl, hEl, fEl] = stage.querySelectorAll('[data-r]');
+    await Promise.all([...stage.querySelectorAll('img')].map(img => img.complete ? 0 : new Promise(r => { img.onload = img.onerror = r; })));
     if (document.fonts && document.fonts.ready) await document.fonts.ready;
-    const hostRect = host.getBoundingClientRect();
-    const total = host.scrollHeight;
-    const marginMm = 18;
-    const pagePx = (297 - 2 * marginMm) / 210 * 794; // altura útil em px CSS
-    // pontos seguros de quebra: base de cada linha de texto e de cada bloco
+    for (const el of [bEl, hEl, fEl]) layoutTabs(el, defTab);
+    const hH = hf.header.html ? hEl.offsetHeight : 0, fH = hf.footer.html ? fEl.offsetHeight : 0;
+    const bodyTop = Math.max(L.mt, L.hdr + hH);
+    const bodyBottom = Math.max(L.mb, L.ftr + fH);
+    const avail = Math.max(100, L.pageH - bodyTop - bodyBottom);
+    const bRect = bEl.getBoundingClientRect();
+    const total = bEl.scrollHeight;
+    const rel = v => v - bRect.top;
+    // pontos de quebra
     const cand = new Set([total]);
     const rng = document.createRange();
-    host.querySelectorAll('p,li,h1,h2,h3,h4,h5,h6,td,th,tr,table,img,blockquote,pre,hr').forEach(el => {
-      cand.add(Math.round(el.getBoundingClientRect().bottom - hostRect.top));
-      if (/^(P|LI|H\d|TD|TH|BLOCKQUOTE)$/.test(el.tagName)){
-        rng.selectNodeContents(el);
-        for (const r of rng.getClientRects()) cand.add(Math.round(r.bottom - hostRect.top) + 2);
-      }
+    bEl.querySelectorAll('p,tr,table,img').forEach(el => {
+      const r = el.getBoundingClientRect(); cand.add(Math.round(rel(r.bottom)));
+      if (el.tagName === 'P'){ rng.selectNodeContents(el); for (const rc of rng.getClientRects()) cand.add(Math.round(rel(rc.bottom) + 1)); }
     });
-    const stops = [...cand].filter(v => v > 0 && v <= total).sort((a,b) => a - b);
+    const forced = [];
+    bEl.querySelectorAll('[data-pb]').forEach(el => forced.push(rel(el.getBoundingClientRect().top)));
+    bEl.querySelectorAll('[data-pba]').forEach(el => forced.push(rel(el.getBoundingClientRect().bottom)));
+    bEl.querySelectorAll('span.pbr').forEach(sp => {
+      const p = sp.closest('p') || bEl; const r = document.createRange(); r.setStart(p, 0); r.setEndBefore(sp);
+      const before = r.toString().trim().length > 0;
+      const rc = sp.getBoundingClientRect();
+      forced.push(before ? rel(rc.bottom) + 2 : rel(rc.top));
+    });
+    forced.sort((a, b) => a - b);
+    const stops = [...cand].filter(v => v > 0 && v <= total).sort((a, b) => a - b);
     const breaks = [];
     let start = 0;
     while (start < total - 1){
-      const target = start + pagePx;
-      if (target >= total){ breaks.push([start, total]); break; }
-      let end = 0;
-      for (const s of stops){ if (s > start + pagePx * 0.4 && s <= target) end = s; }
-      if (!end) end = Math.floor(target);
+      const f = forced.find(v => v > start + 1);
+      const target = start + avail;
+      let end;
+      if (f != null && f <= target) end = f;
+      else if (target >= total) end = total;
+      else { end = 0; for (const s of stops) if (s > start + avail * 0.4 && s <= target) end = s; if (!end) end = Math.floor(target); }
       breaks.push([start, end]); start = end;
     }
+    if (!breaks.length) breaks.push([0, Math.max(1, total)]);
+    // texto invisível (para selecionar e pesquisar no PDF)
+    const wordsB = collectWords(bEl), wordsH = hf.header.html ? collectWords(hEl) : [], wordsF = hf.footer.html ? collectWords(fEl) : [];
+    const anchors = [];
+    for (const [part, key] of [['hdr', 'header'], ['ftr', 'footer']]) for (const a of hf[key].anchors){
+      const pos = anchorPos(a.el, a.w, a.h, L, part);
+      if (pos.x > L.pageW || pos.y > L.pageH || pos.x + a.w < 0 || pos.y + a.h < 0) continue;
+      anchors.push(`<div class="w2p" style="position:absolute;left:${pos.x.toFixed(1)}px;top:${pos.y.toFixed(1)}px;width:${a.w.toFixed(1)}px;z-index:0;${baseCss}">${a.html}</div>`);
+    }
     const { jsPDF } = window.jspdf;
-    const pdf = new jsPDF({ unit: 'mm', format: 'a4', compress: true });
+    const k = 25.4 / 96;
+    const pdf = new jsPDF({ unit: 'mm', format: [L.pageW * k, L.pageH * k], orientation: L.pageW > L.pageH ? 'landscape' : 'portrait', compress: true });
+    let useFO = null;
     for (let i = 0; i < breaks.length; i++){
-      prog(`página ${i+1}/${breaks.length}`);
+      prog(`página ${i + 1}/${breaks.length}`);
       const [s, e] = breaks[i];
-      const canvas = await html2canvas(host, {
-        scale: 2, backgroundColor: '#ffffff', logging: false, useCORS: true,
-        x: hostRect.left + window.scrollX, y: hostRect.top + window.scrollY + s,
-        width: 794, height: Math.max(1, e - s), windowWidth: 1200
-      });
-      if (i > 0) pdf.addPage();
-      pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', 0, marginMm, 210, (e - s) * 210 / 794);
+      const pg = document.createElement('div');
+      pg.className = 'w2p-page';
+      pg.style.cssText = `width:${L.pageW}px;height:${L.pageH}px`;
+      pg.innerHTML = anchors.join('')
+        + (hf.header.html ? `<div style="position:absolute;left:${L.ml}px;top:${L.hdr}px;z-index:1">${hEl.outerHTML}</div>` : '')
+        + (hf.footer.html ? `<div style="position:absolute;left:${L.ml}px;bottom:${L.ftr}px;z-index:1">${fEl.outerHTML}</div>` : '')
+        + `<div style="position:absolute;left:0;top:${bodyTop}px;width:${L.pageW}px;height:${Math.ceil(e - s) + 1}px;overflow:hidden;z-index:2"><div style="position:relative;top:${-s}px;left:${L.ml}px">${bEl.outerHTML}</div></div>`;
+      pg.querySelectorAll('.pgnum').forEach(el => el.textContent = String(i + 1));
+      pg.querySelectorAll('.pgtot').forEach(el => el.textContent = String(breaks.length));
+      pages.appendChild(pg);
+      await Promise.all([...pg.querySelectorAll('img')].map(img => img.complete ? 0 : new Promise(r => { img.onload = img.onerror = r; })));
+      let canvas = null;
+      if (useFO !== false){
+        try {
+          canvas = await svgRender(pg, L.pageW, L.pageH, 2);
+          canvas.toDataURL('image/jpeg', 0.5); // falha se o navegador bloquear o desenho
+          if (useFO == null) useFO = !blankCanvas(canvas);
+          if (!useFO) canvas = null;
+        } catch { useFO = false; canvas = null; }
+      }
+      if (!canvas){
+        const sx = window.scrollX, sy = window.scrollY;
+        window.scrollTo(0, 0);
+        try {
+          canvas = await html2canvas(pg, { scale: 2, backgroundColor: '#ffffff', logging: false, useCORS: true, scrollX: 0, scrollY: 0,
+            onclone: d => { d.querySelectorAll('.w2p-stage').forEach(st => { st.style.opacity = '1'; }); } });
+        } finally { window.scrollTo(sx, sy); }
+      }
+      pg.remove();
+      if (i > 0) pdf.addPage([L.pageW * k, L.pageH * k], L.pageW > L.pageH ? 'landscape' : 'portrait');
+      pdf.addImage(canvas.toDataURL('image/jpeg', 0.9), 'JPEG', 0, 0, L.pageW * k, L.pageH * k);
+      addTextLayer(pdf, wordsB, L.ml, bodyTop, s, e, k);
+      if (wordsH.length) addTextLayer(pdf, wordsH, L.ml, L.hdr, 0, 1e9, k);
+      if (wordsF.length) addTextLayer(pdf, wordsF, L.ml, L.pageH - L.ftr - fH, 0, 1e9, k);
       await tick();
     }
     return { blob: pdf.output('blob'), ext: 'pdf', meta: `${breaks.length} pág.` };
-  } finally { host.remove(); }
+  } finally { stage.remove(); pages.remove(); }
 }
 
 /* ---------- Excel → PDF ---------- */
@@ -929,7 +1584,7 @@ $('#zipAll').addEventListener('click', zipAll);
 $('#clear').addEventListener('click', () => { items.length = 0; render(); });
 
 applyMode(); render();
-const missing = ['pdfjsLib','mammoth','docx','XLSX','jspdf','html2canvas','JSZip'].filter(n => !window[n]);
+const missing = ['pdfjsLib','docx','XLSX','jspdf','html2canvas','JSZip'].filter(n => !window[n]);
 if (missing.length) toast('Algumas bibliotecas não carregaram. Verifique a internet e recarregue a página.');
 })();
 </script>
