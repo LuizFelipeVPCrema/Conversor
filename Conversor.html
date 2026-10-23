@@ -1,0 +1,937 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Conversor de Arquivos</title>
+<style>
+:root{
+  --bg:#F6F7F9; --card:#FFFFFF; --text:#1F2328; --muted:#5F6670; --line:#D9DDE3; --hover:#F0F2F5;
+  --blue:#1F5FD1; --blue-soft:#E8F0FD; --ok:#1A7F37; --err:#C62828;
+  --font:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+@media (prefers-color-scheme: dark){ :root{
+  --bg:#16181C; --card:#1F2227; --text:#E6E8EB; --muted:#9AA1AB; --line:#33373E; --hover:#272B31;
+  --blue:#6EA0FF; --blue-soft:#1E2B44; --ok:#4CC27A; --err:#FF7070; color-scheme:dark; } }
+*{box-sizing:border-box}
+body{margin:0; background:var(--bg); color:var(--text); font:15px/1.5 var(--font); padding:32px 16px 64px}
+.wrap{max-width:760px; margin:0 auto; display:flex; flex-direction:column; gap:20px}
+h1{font-size:26px; margin:0}
+.sub{margin:4px 0 0; color:var(--muted)}
+.card{background:var(--card); border:1px solid var(--line); border-radius:10px; padding:20px}
+.step{font-size:15px; font-weight:600; margin:0 0 12px}
+
+/* Escolha do formato */
+.modes{display:grid; grid-template-columns:repeat(4,1fr); gap:10px}
+.mode{border:1px solid var(--line); background:var(--card); color:var(--text); border-radius:8px; padding:14px 10px; cursor:pointer; font:inherit; font-weight:600; text-align:center}
+.mode small{display:block; font-weight:400; color:var(--muted); font-size:12px; margin-top:2px}
+.mode:hover{background:var(--hover)}
+.mode[aria-pressed="true"]{border-color:var(--blue); background:var(--blue-soft); color:var(--blue); box-shadow:inset 0 0 0 1px var(--blue)}
+.mode[aria-pressed="true"] small{color:var(--blue)}
+.adv{margin-top:14px; display:flex; align-items:center; gap:8px; font-size:14px; color:var(--muted)}
+.adv input{width:16px; height:16px}
+
+/* Envio */
+.drop{border:2px dashed var(--line); border-radius:10px; padding:32px 16px; text-align:center; transition:background .15s, border-color .15s}
+.drop.over{border-color:var(--blue); background:var(--blue-soft)}
+.drop p{margin:0 0 14px; color:var(--muted)}
+.drop strong{color:var(--text)}
+.btns{display:flex; flex-wrap:wrap; gap:10px; justify-content:center}
+.btn{font:inherit; font-weight:600; font-size:14px; padding:9px 16px; border-radius:7px; border:1px solid var(--line); background:var(--card); color:var(--text); cursor:pointer}
+.btn:hover:not(:disabled){background:var(--hover)}
+.btn.primary{background:var(--blue); border-color:var(--blue); color:#fff}
+.btn.primary:hover:not(:disabled){filter:brightness(1.08); background:var(--blue)}
+.btn:disabled{opacity:.5; cursor:not-allowed}
+.btn.sm{padding:5px 12px; font-size:13px}
+.btn:focus-visible,.mode:focus-visible{outline:2px solid var(--blue); outline-offset:2px}
+.opt{margin-top:14px; font-size:14px; color:var(--muted); display:flex; align-items:center; justify-content:center; gap:8px; flex-wrap:wrap}
+select{font:inherit; font-size:14px; padding:4px 8px; border-radius:6px; border:1px solid var(--line); background:var(--card); color:var(--text)}
+
+/* Lista */
+.listhead{display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:8px}
+.listhead .step{margin:0}
+.actions{display:flex; gap:8px; flex-wrap:wrap}
+ul{list-style:none; margin:0; padding:0}
+li.file{display:flex; align-items:center; gap:12px; padding:10px 0; border-top:1px solid var(--line); flex-wrap:wrap}
+.info{flex:1 1 220px; min-width:0}
+.name{font-weight:600; overflow-wrap:anywhere}
+.meta{font-size:13px; color:var(--muted)}
+.err{font-size:13px; color:var(--err)}
+.right{display:flex; align-items:center; gap:10px; flex-wrap:wrap}
+.status{font-size:13px; color:var(--muted); white-space:nowrap}
+.status.done{color:var(--ok); font-weight:600}
+.status.error{color:var(--err); font-weight:600}
+.status.working{color:var(--blue)}
+.x{border:0; background:none; color:var(--muted); font-size:20px; line-height:1; cursor:pointer; padding:2px 6px; border-radius:5px}
+.x:hover{background:var(--hover); color:var(--text)}
+.empty{color:var(--muted); font-size:14px; padding:10px 0; border-top:1px solid var(--line)}
+.note{font-size:13px; color:var(--muted); margin:0}
+.toast{position:fixed; left:50%; bottom:20px; transform:translateX(-50%); background:var(--text); color:var(--bg); padding:10px 16px; border-radius:8px; font-size:14px; max-width:92vw; z-index:10}
+@media (max-width:600px){ .modes{grid-template-columns:repeat(2,1fr)} }
+
+/* Página usada para Word → PDF (fora da tela) */
+.render-page{position:absolute; left:-10000px; top:0; width:794px; padding:0 76px; background:#fff; color:#111; font:15px/1.5 Calibri, Carlito, Arial, sans-serif}
+.render-page h1{font-size:26px; margin:18px 0 10px} .render-page h2{font-size:21px; margin:16px 0 8px} .render-page h3{font-size:18px; margin:14px 0 6px}
+.render-page p{margin:0 0 10px} .render-page ul,.render-page ol{margin:0 0 10px; padding-left:28px; list-style:revert}
+.render-page table{border-collapse:collapse; width:100%; margin:0 0 12px} .render-page td,.render-page th{border:1px solid #9aa0aa; padding:4px 7px; vertical-align:top; color:#111}
+.render-page img{max-width:100%; height:auto}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Conversor de Arquivos</h1>
+    <p class="sub">Converta vários arquivos de uma vez. Os arquivos não saem do seu computador.</p>
+  </header>
+
+  <section class="card">
+    <p class="step">1. Escolha a conversão</p>
+    <div class="modes" id="modes">
+      <button class="mode" type="button" data-mode="pdf-docx" aria-pressed="true">PDF → Word<small>.pdf para .docx</small></button>
+      <button class="mode" type="button" data-mode="docx-pdf" aria-pressed="false">Word → PDF<small>.docx para .pdf</small></button>
+      <button class="mode" type="button" data-mode="pdf-xlsx" aria-pressed="false">PDF → Excel<small>.pdf para .xlsx</small></button>
+      <button class="mode" type="button" data-mode="xlsx-pdf" aria-pressed="false">Excel → PDF<small>.xlsx para .pdf</small></button>
+    </div>
+    <label class="adv" for="advanced"><input type="checkbox" id="advanced"> Modo avançado: misturar formatos e escolher o destino de cada arquivo</label>
+  </section>
+
+  <section class="card">
+    <p class="step">2. Envie os arquivos</p>
+    <div class="drop" id="drop">
+      <p><strong>Arraste arquivos ou pastas para cá</strong><br><span id="acceptHint">Aceita arquivos .pdf</span></p>
+      <div class="btns">
+        <button class="btn primary" type="button" id="pickFiles">Selecionar arquivos</button>
+        <button class="btn" type="button" id="pickFolder">Selecionar pasta</button>
+      </div>
+      <div class="opt" id="xlOpt" hidden>
+        <label for="xlMode">No Excel, colocar</label>
+        <select id="xlMode"><option value="pages">cada página em uma aba</option><option value="single">tudo em uma aba</option></select>
+      </div>
+    </div>
+    <input type="file" id="fileInput" multiple hidden>
+    <input type="file" id="folderInput" webkitdirectory multiple hidden>
+  </section>
+
+  <section class="card">
+    <div class="listhead">
+      <p class="step">3. Converta e baixe <span class="meta" id="count"></span></p>
+      <div class="actions">
+        <button class="btn primary sm" type="button" id="convertAll">Converter</button>
+        <button class="btn sm" type="button" id="zipAll">Baixar tudo (.zip)</button>
+        <button class="btn sm" type="button" id="clear">Limpar</button>
+      </div>
+    </div>
+    <ul id="list"></ul>
+  </section>
+
+  <p class="note">PDFs digitalizados (apenas imagem) não têm texto para extrair. Arquivos .doc antigos precisam ser salvos como .docx antes.</p>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+(() => {
+'use strict';
+const $ = s => document.querySelector(s);
+const items = [];
+let uid = 0, busy = false, mode = 'pdf-docx';
+
+const kindOf = name => {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  if (ext === 'pdf') return 'pdf';
+  if (ext === 'docx') return 'docx';
+  if (['xlsx','xls','csv','ods'].includes(ext)) return 'xlsx';
+  if (ext === 'doc') return 'doc';
+  return null;
+};
+const extOf = name => (name.split('.').pop() || '').toLowerCase();
+const baseName = name => name.replace(/\.[^.]+$/, '');
+const fmtSize = b => b < 1024 ? b + ' B' : b < 1048576 ? (b/1024).toFixed(0) + ' KB' : (b/1048576).toFixed(1).replace('.', ',') + ' MB';
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const tick = () => new Promise(r => setTimeout(r, 0));
+const median = arr => { if (!arr.length) return 0; const a = [...arr].sort((x,y)=>x-y); return a[Math.floor(a.length/2)]; };
+const pct = (arr, p) => { if (!arr.length) return 0; const a = [...arr].sort((x,y)=>x-y); return a[Math.min(a.length-1, Math.floor(a.length*p))]; };
+
+let toastTimer;
+function toast(msg){ const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => t.hidden = true, 4000); }
+
+function saveBlob(name, blob){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+/* ---------- PDF: análise de página (texto, negrito, realces e tabelas com bordas) ---------- */
+async function openPdf(blob){
+  const data = new Uint8Array(await blob.arrayBuffer());
+  return pdfjsLib.getDocument({ data, isEvalSupported: false }).promise;
+}
+function rgbHex(c){
+  if (!c) return null;
+  if (typeof c === 'string') return c.replace('#', '').toUpperCase();
+  const a = Array.from(c);
+  return a.slice(0, 3).map(v => Math.round(v).toString(16).padStart(2, '0')).join('').toUpperCase();
+}
+const isWhite = hex => !hex || hex === 'FFFFFF';
+async function analyzePage(page){
+  const vp = page.getViewport({ scale: 1 });
+  const OPS = pdfjsLib.OPS, U = pdfjsLib.Util;
+  const ol = await page.getOperatorList();
+  const tc = await page.getTextContent();
+  // fontes em negrito
+  const bold = {};
+  for (const k of Object.keys(tc.styles || {})){
+    try { const f = page.commonObjs.get(k); bold[k] = !!(f && (f.bold || f.black || /bold|black|heavy|semibold/i.test(f.name || ''))); } catch { bold[k] = false; }
+  }
+  // texto
+  const items = [];
+  for (const it of tc.items){
+    if (typeof it.str !== 'string' || !it.str.trim()) continue;
+    const t = U.transform(vp.transform, it.transform);
+    const h = Math.hypot(t[2], t[3]) || 10;
+    items.push({ s: it.str, x: t[4], y: t[5], w: Math.max(0, it.width || 0), h, b: !!bold[it.fontName], shade: null });
+  }
+  // desenho: segmentos de linha e retângulos preenchidos
+  let ctm = [1,0,0,1,0,0];
+  const stack = [];
+  let fill = '000000';
+  const fillStack = [];
+  const hSeg = [], vSeg = [], fills = [];
+  const toPage = (x, y) => { const m = U.transform(vp.transform, ctm); return U.applyTransform([x, y], m); };
+  const addSeg = (a, b) => {
+    const dx = Math.abs(a[0] - b[0]), dy = Math.abs(a[1] - b[1]);
+    if (dy < 1.5 && dx > 4) hSeg.push({ y: (a[1] + b[1]) / 2, x0: Math.min(a[0], b[0]), x1: Math.max(a[0], b[0]) });
+    else if (dx < 1.5 && dy > 4) vSeg.push({ x: (a[0] + b[0]) / 2, y0: Math.min(a[1], b[1]), y1: Math.max(a[1], b[1]) });
+  };
+  const rectFrom = pts => {
+    const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+    return { x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) };
+  };
+  for (let i = 0; i < ol.fnArray.length; i++){
+    const fn = ol.fnArray[i], args = ol.argsArray[i];
+    if (fn === OPS.save){ stack.push(ctm); fillStack.push(fill); }
+    else if (fn === OPS.restore){ ctm = stack.pop() || [1,0,0,1,0,0]; fill = fillStack.pop() || fill; }
+    else if (fn === OPS.transform){ ctm = U.transform(ctm, args); }
+    else if (fn === OPS.paintFormXObjectBegin){ stack.push(ctm); fillStack.push(fill); if (args && args[0]) ctm = U.transform(ctm, args[0]); }
+    else if (fn === OPS.paintFormXObjectEnd){ ctm = stack.pop() || [1,0,0,1,0,0]; fill = fillStack.pop() || fill; }
+    else if (fn === OPS.beginAnnotation){ stack.push(ctm); fillStack.push(fill); if (args && args[2]) ctm = U.transform(ctm, args[2]); }
+    else if (fn === OPS.endAnnotation){ ctm = stack.pop() || [1,0,0,1,0,0]; fill = fillStack.pop() || fill; }
+    else if (fn === OPS.setFillRGBColor){ fill = rgbHex(args); }
+    else if (fn === OPS.constructPath){
+      const ops = args[0], a = args[1];
+      // próximo operador de pintura
+      let paint = null;
+      for (let j = i + 1; j < Math.min(ol.fnArray.length, i + 4); j++){
+        const f = ol.fnArray[j];
+        if (f === OPS.stroke || f === OPS.closeStroke){ paint = 'stroke'; break; }
+        if (f === OPS.fill || f === OPS.eoFill){ paint = 'fill'; break; }
+        if (f === OPS.fillStroke || f === OPS.eoFillStroke || f === OPS.closeFillStroke || f === OPS.closeEOFillStroke){ paint = 'both'; break; }
+        if (f === OPS.endPath || f === OPS.clip || f === OPS.eoClip){ paint = null; break; }
+      }
+      if (!paint) continue;
+      let k = 0, start = null, cur = null;
+      const subpaths = [];
+      let sp = [];
+      for (const op of ops){
+        if (op === OPS.rectangle){
+          const x = a[k++], y = a[k++], w = a[k++], h = a[k++];
+          const p = [toPage(x, y), toPage(x + w, y), toPage(x + w, y + h), toPage(x, y + h)];
+          subpaths.push({ pts: p, closed: true, rect: true });
+        } else if (op === OPS.moveTo){
+          if (sp.length) subpaths.push({ pts: sp, closed: false });
+          cur = toPage(a[k++], a[k++]); start = cur; sp = [cur];
+        } else if (op === OPS.lineTo){
+          cur = toPage(a[k++], a[k++]); sp.push(cur);
+        } else if (op === OPS.curveTo){ k += 6; sp = []; }
+        else if (op === OPS.curveTo2 || op === OPS.curveTo3){ k += 4; sp = []; }
+        else if (op === OPS.closePath){ if (sp.length){ subpaths.push({ pts: sp, closed: true }); sp = []; } }
+      }
+      if (sp.length) subpaths.push({ pts: sp, closed: false });
+      for (const s of subpaths){
+        const P = s.pts;
+        if (P.length < 2) continue;
+        const r = rectFrom(P);
+        const isBox = (s.rect || P.length >= 4) && P.every(p => (Math.abs(p[0] - r.x0) < 1 || Math.abs(p[0] - r.x1) < 1) && (Math.abs(p[1] - r.y0) < 1 || Math.abs(p[1] - r.y1) < 1));
+        if (paint === 'fill' || paint === 'both'){
+          if (isBox && (r.y1 - r.y0 < 2.5) && r.x1 - r.x0 > 4) hSeg.push({ y: (r.y0 + r.y1) / 2, x0: r.x0, x1: r.x1 });
+          else if (isBox && (r.x1 - r.x0 < 2.5) && r.y1 - r.y0 > 4) vSeg.push({ x: (r.x0 + r.x1) / 2, y0: r.y0, y1: r.y1 });
+          else if (isBox && !isWhite(fill)) fills.push({ ...r, color: fill });
+        }
+        if (paint === 'stroke' || paint === 'both'){
+          for (let q = 1; q < P.length; q++) addSeg(P[q - 1], P[q]);
+          if (s.closed) addSeg(P[P.length - 1], P[0]);
+        }
+      }
+    }
+  }
+  const tables = buildTables(hSeg, vSeg);
+  // realces (fundo colorido sob o texto, tipo marca-texto)
+  for (const it of items){
+    const cx = it.x + it.w / 2, cy = it.y - it.h * 0.35;
+    let best = null;
+    for (const f of fills){
+      if (cx >= f.x0 && cx <= f.x1 && cy >= f.y0 && cy <= f.y1){
+        const area = (f.x1 - f.x0) * (f.y1 - f.y0);
+        if (!best || area < best.area) best = { color: f.color, area, tall: f.y1 - f.y0 };
+      }
+    }
+    if (best && best.tall < it.h * 2.6) it.shade = best.color;
+  }
+  // distribui o texto entre tabelas e fluxo normal
+  const flow = [];
+  for (const it of items){
+    const cx = it.x + Math.min(it.w, it.h) / 2, cy = it.y - it.h * 0.35;
+    const t = tables.find(t => cx >= t.x0 - 1 && cx <= t.x1 + 1 && cy >= t.y0 - 1 && cy <= t.y1 + 1);
+    if (!t){ flow.push(it); continue; }
+    let cell = null;
+    for (const row of t.rows) for (const c of row) if (cx >= c.x0 - 1 && cx <= c.x1 + 1 && cy >= c.y0 - 1 && cy <= c.y1 + 1) cell = c;
+    if (cell) cell.items.push(it); else flow.push(it);
+  }
+  // cor de fundo das células
+  for (const t of tables) for (const row of t.rows) for (const c of row){
+    const f = fills.find(f => f.x0 <= c.x0 + 2 && f.x1 >= c.x1 - 2 && f.y0 <= c.y0 + 2 && f.y1 >= c.y1 - 2);
+    if (f) c.fill = f.color;
+  }
+  return { width: vp.width, height: vp.height, items, flow, tables };
+}
+function cluster(vals, tol){
+  const s = [...vals].sort((a, b) => a - b), out = [];
+  for (const v of s){ const l = out[out.length - 1]; if (l && v - l.v <= tol){ l.sum += v; l.n++; l.v = l.sum / l.n; } else out.push({ v, sum: v, n: 1 }); }
+  return out.map(o => o.v);
+}
+function buildTables(hSeg, vSeg){
+  const tol = 2.5;
+  // agrupa segmentos que se tocam
+  const segs = [...hSeg.map(s => ({ t: 'h', ...s })), ...vSeg.map(s => ({ t: 'v', ...s }))];
+  const parent = segs.map((_, i) => i);
+  const find = i => parent[i] === i ? i : (parent[i] = find(parent[i]));
+  const touch = (a, b) => {
+    if (a.t === b.t){
+      if (a.t === 'h') return Math.abs(a.y - b.y) < tol && a.x0 <= b.x1 + tol && b.x0 <= a.x1 + tol;
+      return Math.abs(a.x - b.x) < tol && a.y0 <= b.y1 + tol && b.y0 <= a.y1 + tol;
+    }
+    const h = a.t === 'h' ? a : b, v = a.t === 'h' ? b : a;
+    return v.x >= h.x0 - tol && v.x <= h.x1 + tol && h.y >= v.y0 - tol && h.y <= v.y1 + tol;
+  };
+  for (let i = 0; i < segs.length; i++) for (let j = i + 1; j < segs.length; j++) if (touch(segs[i], segs[j])) parent[find(i)] = find(j);
+  const groups = {};
+  segs.forEach((s, i) => (groups[find(i)] = groups[find(i)] || []).push(s));
+  const tables = [];
+  for (const g of Object.values(groups)){
+    const H = g.filter(s => s.t === 'h'), V = g.filter(s => s.t === 'v');
+    if (H.length < 2 || V.length < 2) continue;
+    const ys = cluster(H.map(s => s.y), tol), xs = cluster(V.map(s => s.x), tol);
+    if (ys.length < 2 || xs.length < 2) continue;
+    const x0 = xs[0], x1 = xs[xs.length - 1], y0 = ys[0], y1 = ys[ys.length - 1];
+    if (x1 - x0 < 30 || y1 - y0 < 8) continue;
+    const rows = [];
+    for (let r = 0; r < ys.length - 1; r++){
+      const ya = ys[r], yb = ys[r + 1];
+      if (yb - ya < 3) continue;
+      const mid = (ya + yb) / 2;
+      // divisórias verticais presentes nesta faixa
+      const present = xs.filter((x, i) => i === 0 || i === xs.length - 1 || V.some(v => Math.abs(v.x - x) < tol && v.y0 <= mid && v.y1 >= mid));
+      const row = [];
+      for (let c = 0; c < present.length - 1; c++){
+        const ca = present[c], cb = present[c + 1];
+        const span = xs.filter(x => x >= ca - 0.1 && x < cb - 0.1).length;
+        row.push({ x0: ca, x1: cb, y0: ya, y1: yb, col: xs.indexOf(ca), span, items: [], fill: null });
+      }
+      rows.push(row);
+    }
+    if (rows.length) tables.push({ x0, x1, y0, y1, xs, ys, rows });
+  }
+  return tables;
+}
+// agrupa itens de texto em linhas
+function groupLines(list){
+  const sorted = [...list].sort((a, b) => a.y - b.y || a.x - b.x);
+  const lines = [];
+  for (const it of sorted){
+    let found = null;
+    for (let k = lines.length - 1; k >= Math.max(0, lines.length - 4); k--){
+      if (Math.abs(lines[k].y - it.y) < Math.min(lines[k].h, it.h) * 0.5){ found = lines[k]; break; }
+    }
+    if (found){ found.items.push(it); found.h = Math.max(found.h, it.h); }
+    else lines.push({ y: it.y, h: it.h, items: [it] });
+  }
+  lines.sort((a, b) => a.y - b.y);
+  for (const L of lines){
+    L.items.sort((a, b) => a.x - b.x);
+    L.x0 = L.items[0].x;
+    L.x1 = Math.max(...L.items.map(i => i.x + i.w));
+  }
+  return lines;
+}
+// junta itens próximos em blocos; gapK define quanto espaço separa blocos
+function chunks(items, gapK){
+  const out = [];
+  for (const it of items){
+    const c = out[out.length - 1];
+    const gap = c ? it.x - c.x1 : Infinity;
+    if (c && gap < it.h * gapK){
+      const needSpace = gap > it.h * 0.12 && !c.s.endsWith(' ') && !it.s.startsWith(' ');
+      c.s += (needSpace ? ' ' : '') + it.s; c.x1 = Math.max(c.x1, it.x + it.w);
+    } else out.push({ s: it.s, x0: it.x, x1: it.x + it.w, h: it.h });
+  }
+  out.forEach(c => c.s = c.s.replace(/\s+/g, ' ').trim());
+  return out.filter(c => c.s);
+}
+// linha → trechos com estilo (negrito / realce)
+function lineRuns(L){
+  const runs = [];
+  let prev = null;
+  for (const it of L.items){
+    let sep = '';
+    if (prev){
+      const gap = it.x - (prev.x + prev.w);
+      if (gap > it.h * 1.0) sep = '\t';
+      else if (gap > it.h * 0.12 && !prev.s.endsWith(' ') && !it.s.startsWith(' ')) sep = ' ';
+    }
+    const last = runs[runs.length - 1];
+    if (last && last.b === it.b && last.shade === it.shade && sep !== '\t') last.text += sep + it.s;
+    else {
+      if (sep && last) last.text += sep === '\t' ? '' : sep;
+      runs.push({ text: it.s, b: it.b, shade: it.shade, tab: sep === '\t' });
+    }
+    prev = it;
+  }
+  runs.forEach(r => r.text = r.text.replace(/ {2,}/g, ' '));
+  return runs;
+}
+// linhas → parágrafos (para Word)
+function linesToParas(lines, minX, maxX){
+  if (!lines.length) return [];
+  const body = median(lines.map(l => l.h));
+  const paras = [];
+  let cur = null;
+  for (const L of lines){
+    const runs = lineRuns(L);
+    const text = runs.map(r => r.text).join(' ').trim();
+    if (!text) continue;
+    const w = L.x1 - L.x0;
+    const centered = maxX - minX > 100 && Math.abs((L.x0 + L.x1) / 2 - (minX + maxX) / 2) < (maxX - minX) * 0.05 && w < (maxX - minX) * 0.7 && L.x0 > minX + L.h * 2;
+    const heading = L.h >= body * 1.25;
+    const bullet = /^([•·▪◦‣\-–]|\d{1,2}[.)-]|[a-z][.)])\s/.test(text);
+    const hasTab = runs.some(r => r.tab);
+    const canJoin = cur && !heading && !cur.heading && !centered && !cur.centered && !bullet && !hasTab && !cur.hasTab
+      && Math.abs(L.h - cur.h) < body * 0.15
+      && (L.y - cur.lastY) < L.h * 1.8
+      && cur.lastX1 > maxX - (maxX - minX) * 0.15
+      && Math.abs(L.x0 - cur.lastX0) < L.h * 3;
+    if (canJoin){
+      const lastRun = cur.runs[cur.runs.length - 1];
+      if (/[A-Za-zÀ-ÿ]-$/.test(lastRun.text)) lastRun.text = lastRun.text.slice(0, -1); else lastRun.text += ' ';
+      cur.runs.push(...runs);
+      cur.lastY = L.y; cur.lastX1 = L.x1; cur.lastX0 = L.x0;
+    } else {
+      cur = { runs, h: L.h, heading, centered, hasTab, indent: L.x0 - minX, y: L.y - L.h, lastY: L.y, lastX1: L.x1, lastX0: L.x0, tabs: hasTab ? tabStops(L, minX) : [] };
+      paras.push(cur);
+    }
+  }
+  return paras;
+}
+function tabStops(L, minX){
+  const stops = [];
+  let prev = null;
+  for (const it of L.items){
+    if (prev && it.x - (prev.x + prev.w) > it.h * 1.0) stops.push(Math.round((it.x - minX) * 20));
+    prev = it;
+  }
+  return stops;
+}
+
+/* ---------- PDF → Word ---------- */
+function docxRuns(D, p, size){
+  const out = [];
+  p.runs.forEach((r, i) => {
+    if (r.tab && i > 0) out.push(new D.TextRun({ children: [new D.Tab()], size }));
+    out.push(new D.TextRun({ text: r.text, bold: r.b || p.heading, size, font: 'Arial',
+      shading: r.shade ? { type: D.ShadingType.CLEAR, color: 'auto', fill: r.shade } : undefined }));
+  });
+  return out;
+}
+function docxPara(D, p, opts = {}){
+  const size = Math.max(14, Math.min(72, Math.round(p.h * 2 * 0.95)));
+  return new D.Paragraph({
+    pageBreakBefore: !!opts.pageBreak,
+    alignment: p.centered ? D.AlignmentType.CENTER : D.AlignmentType.LEFT,
+    indent: !p.centered && p.indent > 6 ? { left: Math.round(p.indent * 20) } : undefined,
+    tabStops: p.tabs && p.tabs.length ? p.tabs.map(pos => ({ type: D.TabStopType.LEFT, position: Math.max(0, pos) })) : undefined,
+    spacing: { after: opts.tight ? 0 : (p.heading ? 120 : 80), before: p.heading && !opts.tight ? 120 : 0 },
+    children: docxRuns(D, p, size)
+  });
+}
+function docxTable(D, t){
+  const border = { style: D.BorderStyle.SINGLE, size: 4, color: '808080' };
+  const borders = { top: border, bottom: border, left: border, right: border };
+  const colW = [];
+  for (let i = 0; i < t.xs.length - 1; i++) colW.push(Math.max(200, Math.round((t.xs[i + 1] - t.xs[i]) * 20)));
+  const rows = t.rows.map(row => new D.TableRow({
+    height: { value: Math.round((row[0].y1 - row[0].y0) * 20), rule: D.HeightRule.ATLEAST },
+    children: row.map(c => {
+      const lines = groupLines(c.items);
+      const paras = linesToParas(lines, c.x0 + 2, c.x1 - 2).map(p => { p.centered = false; return docxPara(D, p, { tight: true }); });
+      const w = colW.slice(c.col, c.col + c.span).reduce((a, b) => a + b, 0);
+      return new D.TableCell({
+        columnSpan: c.span > 1 ? c.span : undefined,
+        width: { size: w, type: D.WidthType.DXA },
+        borders,
+        shading: c.fill ? { type: D.ShadingType.CLEAR, color: 'auto', fill: c.fill } : undefined,
+        margins: { top: 20, bottom: 20, left: 60, right: 60 },
+        verticalAlign: D.VerticalAlign.CENTER,
+        children: paras.length ? paras : [new D.Paragraph({ children: [], spacing: { after: 0 } })]
+      });
+    })
+  }));
+  return new D.Table({ rows, columnWidths: colW, width: { size: colW.reduce((a, b) => a + b, 0), type: D.WidthType.DXA }, layout: D.TableLayoutType.FIXED });
+}
+async function pdfToDocx(item, prog){
+  const D = window.docx;
+  const pdf = await openPdf(item.file);
+  const children = [];
+  let pageW = 595, pageH = 842, margins = null, totalChars = 0, tableCount = 0;
+  for (let p = 1; p <= pdf.numPages; p++){
+    prog(`página ${p}/${pdf.numPages}`);
+    const page = await pdf.getPage(p);
+    const A = await analyzePage(page);
+    if (p === 1){ pageW = A.width; pageH = A.height; }
+    totalChars += A.items.reduce((n, i) => n + i.s.length, 0);
+    const allX0 = A.items.map(i => i.x).concat(A.tables.map(t => t.x0));
+    const allX1 = A.items.map(i => i.x + i.w).concat(A.tables.map(t => t.x1));
+    if (!allX0.length){ await tick(); continue; }
+    const minX = Math.min(pct(allX0, 0.05), ...A.tables.map(t => t.x0));
+    const maxX = Math.max(pct(allX1, 0.95), ...A.tables.map(t => t.x1));
+    if (!margins){
+      const clamp = v => Math.max(300, Math.min(2160, Math.round(v * 20)));
+      const ys = A.items.map(i => i.y - i.h).concat(A.tables.map(t => t.y0));
+      margins = { left: clamp(minX), right: clamp(A.width - maxX), top: clamp(Math.min(...ys) - 4), bottom: clamp(36) };
+    }
+    const blocks = [];
+    for (const para of linesToParas(groupLines(A.flow), minX, maxX)) blocks.push({ y: para.y, para });
+    for (const t of A.tables) blocks.push({ y: t.y0, table: t });
+    blocks.sort((a, b) => a.y - b.y);
+    let first = true;
+    for (const b of blocks){
+      if (b.para){ children.push(docxPara(D, b.para, { pageBreak: p > 1 && first })); }
+      else {
+        if (p > 1 && first) children.push(new D.Paragraph({ pageBreakBefore: true, spacing: { after: 0 }, children: [] }));
+        children.push(docxTable(D, b.table));
+        children.push(new D.Paragraph({ spacing: { after: 60 }, children: [] }));
+        tableCount++;
+      }
+      first = false;
+    }
+    await tick();
+  }
+  if (totalChars < 5) throw new Error('Este PDF não tem texto selecionável (provavelmente é digitalizado).');
+  const doc = new D.Document({
+    creator: 'Conversor de Arquivos',
+    styles: { default: { document: { run: { font: 'Arial' } } } },
+    sections: [{ properties: { page: { size: { width: Math.round(pageW * 20), height: Math.round(pageH * 20) }, margin: margins || { top: 1134, bottom: 1134, left: 1134, right: 1134 } } }, children }]
+  });
+  return { blob: await D.Packer.toBlob(doc), ext: 'docx', meta: `${pdf.numPages} pág.${tableCount ? ` · ${tableCount} tabela${tableCount > 1 ? 's' : ''}` : ''}` };
+}
+
+/* ---------- PDF → Excel ---------- */
+function toNumber(s){
+  let t = s.replace(/\s/g, '').replace(/^R\$/, '');
+  let pctSign = false;
+  if (t.endsWith('%')){ pctSign = true; t = t.slice(0, -1); }
+  let neg = false;
+  if (/^\(.*\)$/.test(t)){ neg = true; t = t.slice(1, -1); }
+  if (t.startsWith('-')){ neg = !neg; t = t.slice(1); }
+  if (!t || t.length > 18) return null;
+  if (/^0\d/.test(t) && !/[.,]/.test(t)) return null; // códigos com zero à esquerda
+  let v = null;
+  if (/^\d{1,3}(\.\d{3})+(,\d+)?$/.test(t) || /^\d+,\d+$/.test(t)) v = parseFloat(t.replace(/\./g, '').replace(',', '.'));
+  else if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(t)) v = parseFloat(t.replace(/,/g, ''));
+  else if (/^\d+(\.\d+)?$/.test(t)) v = parseFloat(t);
+  if (v === null || !isFinite(v)) return null;
+  if (neg) v = -v;
+  return pctSign ? { v: v / 100, z: '0.00%' } : { v };
+}
+// texto sem bordas → grade pelo alinhamento das colunas
+function flowToGrid(lines, width){
+  const rows = lines.map(L => chunks(L.items, 0.9));
+  const multi = rows.filter(r => r.length >= 2);
+  let bounds = [];
+  if (multi.length){
+    const W = Math.ceil(width) + 2;
+    const cov = new Uint16Array(W);
+    for (const r of multi) for (const c of r){
+      for (let x = Math.max(0, Math.floor(c.x0)); x < Math.min(W, Math.ceil(c.x1)); x++) cov[x]++;
+    }
+    const thr = Math.floor(multi.length * 0.08);
+    let inGap = false, gs = 0, seenInk = false;
+    for (let x = 0; x < W; x++){
+      const empty = cov[x] <= thr;
+      if (!empty) seenInk = true;
+      if (empty && !inGap && seenInk){ inGap = true; gs = x; }
+      if (!empty && inGap){ inGap = false; if (x - gs >= 3) bounds.push((gs + x) / 2); }
+    }
+  }
+  const colOf = x => { let i = 0; while (i < bounds.length && x > bounds[i]) i++; return i; };
+  const nCols = bounds.length + 1;
+  return rows.map((r, i) => {
+    const out = new Array(nCols).fill('');
+    for (const c of r){
+      const k = r.length === 1 ? colOf(c.x0 + 1) : colOf((c.x0 + c.x1) / 2);
+      out[k] = out[k] ? out[k] + ' ' + c.s : c.s;
+    }
+    return { y: lines[i].y - lines[i].h, cells: out };
+  });
+}
+function cellText(items){
+  return groupLines(items).map(L => chunks(L.items, 1.6).map(c => c.s).join(' ')).join('\n');
+}
+// página → linhas da planilha + mesclagens
+function pageToSheetRows(A){
+  const blocks = [];
+  for (const r of flowToGrid(groupLines(A.flow), A.width)) blocks.push({ y: r.y, cells: r.cells.map(v => ({ v })), merges: [] });
+  for (const t of A.tables){
+    const tRows = t.rows.map(row => {
+      const cells = [], merges = [];
+      for (const c of row){
+        while (cells.length < c.col) cells.push({ v: '' });
+        cells.push({ v: cellText(c.items), fill: c.fill });
+        for (let k = 1; k < c.span; k++) cells.push({ v: '', fill: c.fill });
+        if (c.span > 1) merges.push([c.col, c.col + c.span - 1]);
+      }
+      return { cells, merges, table: true };
+    });
+    tRows.forEach((r, i) => blocks.push({ y: t.y0 + i * 0.001, ...r }));
+  }
+  blocks.sort((a, b) => a.y - b.y);
+  return blocks;
+}
+function rowsToSheet(rows){
+  const ws = {};
+  const merges = [];
+  let maxC = 0;
+  const widths = [];
+  rows.forEach((row, r) => {
+    row.cells.forEach((cell, c) => {
+      const val = cell.v;
+      if (val === '' || val == null) return;
+      maxC = Math.max(maxC, c);
+      const ref = XLSX.utils.encode_cell({ r, c });
+      const n = /\n/.test(val) ? null : toNumber(val);
+      ws[ref] = n ? (n.z ? { t: 'n', v: n.v, z: n.z } : { t: 'n', v: n.v }) : { t: 's', v: val };
+      const len = Math.max(...String(val).split('\n').map(s => s.length));
+      widths[c] = Math.max(widths[c] || 8, Math.min(60, len + 2));
+    });
+    maxC = Math.max(maxC, row.cells.length - 1);
+    for (const [a, b] of row.merges || []) merges.push({ s: { r, c: a }, e: { r, c: b } });
+  });
+  ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.max(0, rows.length - 1), c: Math.max(0, maxC) } });
+  if (merges.length) ws['!merges'] = merges;
+  ws['!cols'] = Array.from({ length: maxC + 1 }, (_, c) => ({ wch: widths[c] || 8 }));
+  return ws;
+}
+async function pdfToXlsx(item, prog){
+  const pdf = await openPdf(item.file);
+  const wb = XLSX.utils.book_new();
+  const single = $('#xlMode').value === 'single';
+  let all = [], total = 0;
+  for (let p = 1; p <= pdf.numPages; p++){
+    prog(`página ${p}/${pdf.numPages}`);
+    const page = await pdf.getPage(p);
+    const rows = pageToSheetRows(await analyzePage(page));
+    total += rows.length;
+    if (single){ all = all.concat(rows); if (p < pdf.numPages && rows.length) all.push({ cells: [] }); }
+    else if (rows.length) XLSX.utils.book_append_sheet(wb, rowsToSheet(rows), `Página ${p}`);
+    await tick();
+  }
+  if (!total) throw new Error('Este PDF não tem texto selecionável (provavelmente é digitalizado).');
+  if (single) XLSX.utils.book_append_sheet(wb, rowsToSheet(all), 'Dados');
+  const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  return { blob: new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), ext: 'xlsx', meta: `${pdf.numPages} pág.` };
+}
+
+/* ---------- Word → PDF ---------- */
+async function docxToPdf(item, prog){
+  prog('lendo documento');
+  const { value: html } = await mammoth.convertToHtml({ arrayBuffer: await item.file.arrayBuffer() });
+  const host = document.createElement('div');
+  host.className = 'render-page';
+  host.innerHTML = html || '<p></p>';
+  document.body.appendChild(host);
+  try {
+    await Promise.all([...host.querySelectorAll('img')].map(img => img.complete ? 0 : new Promise(r => { img.onload = img.onerror = r; })));
+    if (document.fonts && document.fonts.ready) await document.fonts.ready;
+    const hostRect = host.getBoundingClientRect();
+    const total = host.scrollHeight;
+    const marginMm = 18;
+    const pagePx = (297 - 2 * marginMm) / 210 * 794; // altura útil em px CSS
+    // pontos seguros de quebra: base de cada linha de texto e de cada bloco
+    const cand = new Set([total]);
+    const rng = document.createRange();
+    host.querySelectorAll('p,li,h1,h2,h3,h4,h5,h6,td,th,tr,table,img,blockquote,pre,hr').forEach(el => {
+      cand.add(Math.round(el.getBoundingClientRect().bottom - hostRect.top));
+      if (/^(P|LI|H\d|TD|TH|BLOCKQUOTE)$/.test(el.tagName)){
+        rng.selectNodeContents(el);
+        for (const r of rng.getClientRects()) cand.add(Math.round(r.bottom - hostRect.top) + 2);
+      }
+    });
+    const stops = [...cand].filter(v => v > 0 && v <= total).sort((a,b) => a - b);
+    const breaks = [];
+    let start = 0;
+    while (start < total - 1){
+      const target = start + pagePx;
+      if (target >= total){ breaks.push([start, total]); break; }
+      let end = 0;
+      for (const s of stops){ if (s > start + pagePx * 0.4 && s <= target) end = s; }
+      if (!end) end = Math.floor(target);
+      breaks.push([start, end]); start = end;
+    }
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({ unit: 'mm', format: 'a4', compress: true });
+    for (let i = 0; i < breaks.length; i++){
+      prog(`página ${i+1}/${breaks.length}`);
+      const [s, e] = breaks[i];
+      const canvas = await html2canvas(host, {
+        scale: 2, backgroundColor: '#ffffff', logging: false, useCORS: true,
+        x: hostRect.left + window.scrollX, y: hostRect.top + window.scrollY + s,
+        width: 794, height: Math.max(1, e - s), windowWidth: 1200
+      });
+      if (i > 0) pdf.addPage();
+      pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', 0, marginMm, 210, (e - s) * 210 / 794);
+      await tick();
+    }
+    return { blob: pdf.output('blob'), ext: 'pdf', meta: `${breaks.length} pág.` };
+  } finally { host.remove(); }
+}
+
+/* ---------- Excel → PDF ---------- */
+async function xlsxToPdf(item, prog){
+  prog('lendo planilha');
+  const wb = XLSX.read(new Uint8Array(await item.file.arrayBuffer()), { type: 'array', cellDates: true });
+  const { jsPDF } = window.jspdf;
+  let pdf = null, sheets = 0;
+  const hidden = (wb.Workbook && wb.Workbook.Sheets) || [];
+  for (let si = 0; si < wb.SheetNames.length; si++){
+    if (hidden[si] && hidden[si].Hidden) continue;
+    const name = wb.SheetNames[si];
+    prog(`aba ${si+1}/${wb.SheetNames.length}`);
+    let rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: false, defval: '', blankrows: false });
+    rows = rows.map(r => r.map(v => v == null ? '' : String(v)));
+    if (!rows.length) continue;
+    let nCols = 0;
+    rows.forEach(r => { for (let c = r.length - 1; c >= 0; c--) if (r[c].trim()){ nCols = Math.max(nCols, c + 1); break; } });
+    if (!nCols) continue;
+    rows = rows.map(r => { const a = r.slice(0, nCols); while (a.length < nCols) a.push(''); return a; });
+    const orient = nCols > 7 ? 'landscape' : 'portrait';
+    if (!pdf) pdf = new jsPDF({ orientation: orient, unit: 'pt', format: 'a4' });
+    else pdf.addPage('a4', orient);
+    sheets++;
+    const fs = nCols > 16 ? 5.5 : nCols > 12 ? 6.5 : nCols > 8 ? 7.5 : 9;
+    pdf.setFont('helvetica', 'bold'); pdf.setFontSize(12); pdf.setTextColor(26, 30, 41);
+    pdf.text(name, 36, 34);
+    pdf.autoTable({
+      head: [rows[0]], body: rows.slice(1), startY: 46,
+      margin: { left: 36, right: 36, top: 36, bottom: 36 },
+      styles: { font: 'helvetica', fontSize: fs, cellPadding: 3, overflow: 'linebreak', lineColor: [200, 205, 215], lineWidth: 0.4, textColor: [26, 30, 41] },
+      headStyles: { fillColor: [35, 64, 184], textColor: [255, 255, 255], fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: [244, 246, 250] },
+      didParseCell: d => { if (d.section === 'body' && toNumber(String(d.cell.raw || ''))) d.cell.styles.halign = 'right'; }
+    });
+    await tick();
+  }
+  if (!pdf) throw new Error('A planilha está vazia.');
+  const n = pdf.getNumberOfPages();
+  for (let i = 1; i <= n; i++){
+    pdf.setPage(i); pdf.setFont('helvetica', 'normal'); pdf.setFontSize(8); pdf.setTextColor(120);
+    const w = pdf.internal.pageSize.getWidth(), h = pdf.internal.pageSize.getHeight();
+    pdf.text(`${i} / ${n}`, w - 36, h - 18, { align: 'right' });
+  }
+  return { blob: pdf.output('blob'), ext: 'pdf', meta: `${sheets} aba${sheets > 1 ? 's' : ''}` };
+}
+
+
+/* ---------- modos ---------- */
+const MODES = {
+  'pdf-docx': { from: 'pdf',  to: 'docx', accept: '.pdf',                 hint: 'Aceita arquivos .pdf' },
+  'docx-pdf': { from: 'docx', to: 'pdf',  accept: '.docx',                hint: 'Aceita arquivos .docx' },
+  'pdf-xlsx': { from: 'pdf',  to: 'xlsx', accept: '.pdf',                 hint: 'Aceita arquivos .pdf' },
+  'xlsx-pdf': { from: 'xlsx', to: 'pdf',  accept: '.xlsx,.xls,.csv,.ods', hint: 'Aceita arquivos .xlsx, .xls, .csv e .ods' }
+};
+const advanced = () => $('#advanced').checked;
+function applyMode(){
+  document.querySelectorAll('.mode').forEach(b => b.setAttribute('aria-pressed', String(!advanced() && b.dataset.mode === mode)));
+  $('#modes').style.opacity = advanced() ? .45 : 1;
+  const m = MODES[mode];
+  $('#fileInput').accept = advanced() ? '.pdf,.docx,.xlsx,.xls,.csv,.ods' : m.accept;
+  $('#acceptHint').textContent = advanced() ? 'Aceita .pdf, .docx, .xlsx, .xls, .csv e .ods misturados' : m.hint;
+  $('#xlOpt').hidden = !(advanced() || mode === 'pdf-xlsx');
+}
+$('#modes').addEventListener('click', e => {
+  const b = e.target.closest('.mode'); if (!b || busy) return;
+  if ($('#advanced').checked) $('#advanced').checked = false;
+  if (b.dataset.mode !== mode){ mode = b.dataset.mode; items.length = 0; }
+  applyMode(); render();
+});
+$('#advanced').addEventListener('change', () => {
+  if (!advanced()){ // volta ao modo simples: só ficam os arquivos compatíveis
+    const m = MODES[mode];
+    for (let i = items.length - 1; i >= 0; i--){ const it = items[i]; if (it.kind !== m.from) items.splice(i, 1); else if (it.target !== m.to){ it.target = m.to; it.out = null; it.status = 'ready'; } }
+  }
+  applyMode(); render();
+});
+
+/* ---------- adicionar arquivos ---------- */
+function addFiles(files){
+  let added = 0, skipped = 0;
+  for (const f of files){
+    if (f.name.startsWith('.')) continue;
+    const kind = kindOf(f.name);
+    let target;
+    if (advanced()){
+      if (!kind || kind === 'doc'){ skipped++; continue; }
+      target = kind === 'pdf' ? 'docx' : 'pdf';
+    } else {
+      const m = MODES[mode];
+      if (kind !== m.from){ skipped++; continue; }
+      target = m.to;
+    }
+    const it = { id: ++uid, file: f, name: f.webkitRelativePath || f._path || f.name, size: f.size, kind, target, status: 'ready', msg: '', out: null, meta: '' };
+    items.push(it); added++;
+    if (kind === 'pdf') openPdf(f).then(d => { it.meta = `${d.numPages} pág.`; render(); }).catch(() => {});
+  }
+  if (skipped) toast(`${skipped} arquivo${skipped > 1 ? 's ignorados' : ' ignorado'} por não ser${skipped > 1 ? 'em' : ''} do formato escolhido.`);
+  else if (!added) toast('Nenhum arquivo compatível encontrado.');
+  render();
+}
+// lê pastas arrastadas
+function readEntry(entry, path = ''){
+  return new Promise(resolve => {
+    if (entry.isFile) entry.file(f => { f._path = path + f.name; resolve([f]); }, () => resolve([]));
+    else if (entry.isDirectory){
+      const reader = entry.createReader(), all = [];
+      const next = () => reader.readEntries(async ents => {
+        if (!ents.length){ const nested = await Promise.all(all.map(e => readEntry(e, path + entry.name + '/'))); resolve(nested.flat()); }
+        else { all.push(...ents); next(); }
+      }, () => resolve([]));
+      next();
+    } else resolve([]);
+  });
+}
+
+/* ---------- lista ---------- */
+const LABEL = { docx: 'Word', xlsx: 'Excel', pdf: 'PDF' };
+function render(){
+  const ul = $('#list');
+  $('#count').textContent = items.length ? `(${items.length} arquivo${items.length > 1 ? 's' : ''})` : '';
+  if (!items.length) ul.innerHTML = '<li class="empty">Nenhum arquivo adicionado ainda.</li>';
+  else ul.innerHTML = items.map(it => {
+    let dest = '';
+    if (advanced()){
+      dest = it.kind === 'pdf'
+        ? `<select data-id="${it.id}" aria-label="Destino de ${esc(it.name)}" ${busy ? 'disabled' : ''}><option value="docx" ${it.target==='docx'?'selected':''}>para Word</option><option value="xlsx" ${it.target==='xlsx'?'selected':''}>para Excel</option></select>`
+        : '<span class="status">para PDF</span>';
+    }
+    const status = it.status === 'ready' ? '<span class="status">Aguardando</span>'
+      : it.status === 'working' ? `<span class="status working" id="st-${it.id}">Convertendo… ${esc(it.progress || '')}</span>`
+      : it.status === 'done' ? '<span class="status done">Pronto</span>'
+      : '<span class="status error">Erro</span>';
+    const btn = it.status === 'done' ? `<button class="btn sm primary" type="button" data-act="dl" data-id="${it.id}">Baixar</button>` : '';
+    return `<li class="file">
+      <div class="info"><div class="name">${esc(it.name)}</div>
+        <div class="meta">${fmtSize(it.size)}${it.meta ? ' · ' + esc(it.meta) : ''}${it.out ? ' → ' + esc(it.out.name) : ''}</div>
+        ${it.status === 'error' ? `<div class="err">${esc(it.msg)}</div>` : ''}</div>
+      <div class="right">${dest}${status}${btn}<button class="x" type="button" data-act="rm" data-id="${it.id}" aria-label="Remover ${esc(it.name)}" ${it.status === 'working' ? 'disabled' : ''}>×</button></div>
+    </li>`;
+  }).join('');
+  const pending = items.some(i => i.status === 'ready' || i.status === 'error');
+  $('#convertAll').disabled = busy || !pending;
+  $('#convertAll').textContent = busy ? 'Convertendo…' : 'Converter';
+  $('#zipAll').disabled = busy || !items.some(i => i.out);
+  $('#clear').disabled = busy || !items.length;
+}
+async function convert(it){
+  it.status = 'working'; it.progress = ''; it.msg = ''; render();
+  const prog = t => { it.progress = t; const s = document.getElementById('st-' + it.id); if (s) s.textContent = 'Convertendo… ' + t; };
+  try {
+    const fn = it.kind === 'pdf' ? (it.target === 'xlsx' ? pdfToXlsx : pdfToDocx) : it.kind === 'docx' ? docxToPdf : xlsxToPdf;
+    const r = await fn(it, prog);
+    it.out = { blob: r.blob, name: baseName(it.file.name) + '.' + r.ext };
+    if (r.meta && !it.meta) it.meta = r.meta;
+    it.status = 'done';
+  } catch (e){
+    console.error(e);
+    it.status = 'error'; it.out = null;
+    it.msg = (e && e.name === 'PasswordException') ? 'O PDF tem senha. Remova a proteção e tente de novo.' : (e && e.message) || 'Falha na conversão.';
+  }
+  render();
+}
+async function convertAll(){
+  if (busy) return;
+  busy = true; render();
+  const todo = items.filter(i => i.status === 'ready' || i.status === 'error');
+  for (const it of todo){ if (items.includes(it)) await convert(it); }
+  busy = false; render();
+  const ok = todo.filter(i => i.status === 'done').length;
+  toast(ok === todo.length ? `Pronto! ${ok} arquivo${ok > 1 ? 's convertidos' : ' convertido'}.` : `${ok} de ${todo.length} convertidos. Veja os erros na lista.`);
+}
+async function zipAll(){
+  const done = items.filter(i => i.out);
+  if (!done.length) return;
+  if (done.length === 1) return saveBlob(done[0].out.name, done[0].out.blob);
+  const zip = new JSZip(), used = new Set();
+  for (const it of done){
+    const folder = it.name.includes('/') ? it.name.slice(0, it.name.lastIndexOf('/') + 1) : '';
+    let n = folder + it.out.name, k = 2;
+    while (used.has(n.toLowerCase())) n = folder + baseName(it.out.name) + ` (${k++}).` + extOf(it.out.name);
+    used.add(n.toLowerCase()); zip.file(n, it.out.blob);
+  }
+  saveBlob('convertidos.zip', await zip.generateAsync({ type: 'blob' }));
+}
+
+/* ---------- eventos ---------- */
+const fileInput = $('#fileInput'), folderInput = $('#folderInput'), drop = $('#drop');
+$('#pickFiles').addEventListener('click', () => fileInput.click());
+$('#pickFolder').addEventListener('click', () => folderInput.click());
+fileInput.addEventListener('change', () => { addFiles([...fileInput.files]); fileInput.value = ''; });
+folderInput.addEventListener('change', () => { addFiles([...folderInput.files]); folderInput.value = ''; });
+['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+drop.addEventListener('dragleave', e => { if (!drop.contains(e.relatedTarget)) drop.classList.remove('over'); });
+drop.addEventListener('drop', async e => {
+  e.preventDefault(); drop.classList.remove('over');
+  const dt = e.dataTransfer; if (!dt) return;
+  const entries = [...(dt.items || [])].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(Boolean);
+  if (entries.length){ const lists = await Promise.all(entries.map(en => readEntry(en))); addFiles(lists.flat()); }
+  else addFiles([...dt.files]);
+});
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('drop', e => e.preventDefault());
+$('#list').addEventListener('click', e => {
+  const b = e.target.closest('button[data-act]'); if (!b) return;
+  const it = items.find(i => i.id === +b.dataset.id); if (!it) return;
+  if (b.dataset.act === 'rm'){ items.splice(items.indexOf(it), 1); render(); }
+  else if (b.dataset.act === 'dl') saveBlob(it.out.name, it.out.blob);
+});
+$('#list').addEventListener('change', e => {
+  const s = e.target.closest('select[data-id]'); if (!s) return;
+  const it = items.find(i => i.id === +s.dataset.id); if (!it) return;
+  it.target = s.value; it.status = 'ready'; it.out = null; render();
+});
+$('#convertAll').addEventListener('click', convertAll);
+$('#zipAll').addEventListener('click', zipAll);
+$('#clear').addEventListener('click', () => { items.length = 0; render(); });
+
+applyMode(); render();
+const missing = ['pdfjsLib','mammoth','docx','XLSX','jspdf','html2canvas','JSZip'].filter(n => !window[n]);
+if (missing.length) toast('Algumas bibliotecas não carregaram. Verifique a internet e recarregue a página.');
+})();
+</script>
+</body>
+</html>
